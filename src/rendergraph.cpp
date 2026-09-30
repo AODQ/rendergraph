@@ -94,19 +94,6 @@ static ImplNodeInstance const * impl_node_find(
 	return it == g.state.nodes.end() ? nullptr : &it->second;
 }
 
-static ImplLink const * impl_link_find_from(
-	ImplGraph const & g,
-	uint32_t const nodeA,
-	uint32_t const pinA
-) {
-	for (ImplLink const & link : g.state.links) {
-		if (link.nodeA == nodeA && link.pinA == pinA) {
-			return &link;
-		}
-	}
-	return nullptr;
-}
-
 static ImplLink const * impl_link_find_into(
 	ImplGraph const & g,
 	uint32_t const nodeB,
@@ -196,13 +183,9 @@ static bool impl_link_check(
 	rg::PinDesc const & descB = typeB.pinIn[pinB];
 	if (!impl_pin_kinds_compatible(descA.kind, descB.kind)) { return false; }
 
-	// with allowReplace the caller removes the conflicting links first
-	if (!allowReplace) {
-		if (impl_link_find_into(g, nodeBId, pinB)) { return false; }
-		bool const outputFull = (
-			!descA.pinOut.allowMultiple && impl_link_find_from(g, nodeAId, pinA)
-		);
-		if (outputFull) { return false; }
+	// with allowReplace the caller removes the input's existing link first
+	if (!allowReplace && impl_link_find_into(g, nodeBId, pinB)) {
+		return false;
 	}
 
 	// a previous-frame input can't form a cycle, even with its own node
@@ -695,9 +678,9 @@ static void impl_ui_draw_properties(rg::Graph const graph) {
 	// -- outputs
 	if (!nodeType.pinOut.empty()) {
 		ImGui::SeparatorText("outputs");
-		if (ImGui::BeginTable("outputs", 7, tableFlags)) {
+		if (ImGui::BeginTable("outputs", 6, tableFlags)) {
 			for (char const * col : {
-				"name", "kind", "format", "access", "multiple", "size", "links",
+				"name", "kind", "format", "access", "size", "links",
 			}) {
 				ImGui::TableSetupColumn(col);
 			}
@@ -715,7 +698,6 @@ static void impl_ui_draw_properties(rg::Graph const graph) {
 				ImGui::TableNextColumn(); ImGui::TextUnformatted(impl_to_string(pin.kind));
 				ImGui::TableNextColumn(); ImGui::TextUnformatted(impl_to_string(pin.pinOut.format));
 				ImGui::TableNextColumn(); ImGui::TextUnformatted(impl_to_string(pin.pinOut.accessMode));
-				ImGui::TableNextColumn(); ImGui::TextUnformatted(pin.pinOut.allowMultiple ? "yes" : "no");
 				ImGui::TableNextColumn();
 				ImGui::Text("%gx%g, %u mips", pin.scaleWidth, pin.scaleHeight, pin.mipLevels);
 				ImGui::TableNextColumn(); ImGui::Text("%d", static_cast<int>(numLinks));
@@ -749,7 +731,7 @@ static void impl_ui_handle_input(rg::Graph const graph) {
 	ImplGraph & g = impl_graph(graph);
 	ImGuiIO const & io = ImGui::GetIO();
 
-	// -- created links; replaces whatever link the new one conflicts with
+	// -- created links; dropping onto a linked input replaces its link
 	{
 		int startedId = 0;
 		int endedId = 0;
@@ -765,15 +747,6 @@ static void impl_ui_handle_input(rg::Graph const graph) {
 				rg::transaction_begin(graph);
 				if (ImplLink const * old = impl_link_find_into(g, b.nodeId, b.index)) {
 					rg::link_destroy(graph, { old->id });
-				}
-				ImplNodeInstance const & nodeA = g.state.nodes.at(a.nodeId);
-				bool const single = (
-					!impl_node_type(nodeA.type).pinOut[a.index].pinOut.allowMultiple
-				);
-				if (single) {
-					if (ImplLink const * old = impl_link_find_from(g, a.nodeId, a.index)) {
-						rg::link_destroy(graph, { old->id });
-					}
 				}
 				rg::node_instance_link(
 					graph, { a.nodeId }, a.index, { b.nodeId }, b.index

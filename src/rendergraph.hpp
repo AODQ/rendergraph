@@ -71,7 +71,6 @@ namespace rg
 		} pinIn;
 
 		struct {
-			bool allowMultiple;
 			ImageFormat format;
 			AccessMode accessMode;
 		} pinOut;
@@ -199,8 +198,7 @@ namespace rg
 	);
 
 	// can nodeA.pinA -> nodeB.pinB be linked? pinA is an output index, pinB an
-	// input index. Fails on kind mismatch, an already-linked input, an
-	// already-linked output without allowMultiple, or a cycle.
+	// input index. Fails on kind mismatch, an already-linked input, or a cycle.
 	// Links into a previous-frame input are exempt from the cycle check.
 	bool node_instance_can_link(
 		Graph const graph,
