@@ -662,6 +662,125 @@ static auto impl_ui_parameter_value_text(
 }
 
 // -----------------------------------------------------------------------------
+// -- ui impl: theme
+// -----------------------------------------------------------------------------
+
+namespace
+{
+	// terminal palette: black background with amber, teal and green accents
+	struct ImplUiPalette {
+		ImU32 background;
+		ImU32 surface; // title bars, lifted slightly from the background
+		ImU32 border;
+		ImU32 grid;
+		ImU32 gridPrimary;
+		ImU32 text;
+		ImU32 dim; // secondary text, eg formats
+		ImU32 accent; // amber
+		ImU32 secondary; // teal
+		ImU32 tertiary; // green
+		ImU32 rule; // dark red; selection
+	};
+
+	struct ImplUiThemeColor {
+		ImNodesCol col;
+		ImU32 color;
+	};
+
+	struct ImplUiThemeVar {
+		ImNodesStyleVar var;
+		float value;
+	};
+}
+
+constexpr ImplUiPalette kUiPalette = {
+	.background = IM_COL32(0, 0, 0, 255),
+	.surface = IM_COL32(18, 18, 18, 255),
+	.border = IM_COL32(58, 58, 58, 255),
+	.grid = IM_COL32(14, 14, 14, 255),
+	.gridPrimary = IM_COL32(26, 26, 26, 255),
+	.text = IM_COL32(208, 208, 208, 255),
+	.dim = IM_COL32(108, 108, 108, 255),
+	.accent = IM_COL32(215, 164, 95, 255),
+	.secondary = IM_COL32(63, 167, 176, 255),
+	.tertiary = IM_COL32(135, 215, 95, 255),
+	.rule = IM_COL32(95, 10, 10, 255),
+};
+
+constexpr ImplUiThemeColor kUiThemeColors[] = {
+	{ ImNodesCol_NodeBackground, kUiPalette.background },
+	{ ImNodesCol_NodeBackgroundHovered, kUiPalette.background },
+	{ ImNodesCol_NodeBackgroundSelected, kUiPalette.background },
+	{ ImNodesCol_NodeOutline, kUiPalette.border },
+	{ ImNodesCol_TitleBar, kUiPalette.surface },
+	{ ImNodesCol_TitleBarHovered, kUiPalette.surface },
+	{ ImNodesCol_TitleBarSelected, kUiPalette.rule },
+	{ ImNodesCol_BoxSelector, IM_COL32(215, 164, 95, 30) },
+	{ ImNodesCol_BoxSelectorOutline, kUiPalette.accent },
+	{ ImNodesCol_GridBackground, kUiPalette.background },
+	{ ImNodesCol_GridLine, kUiPalette.grid },
+	{ ImNodesCol_GridLinePrimary, kUiPalette.gridPrimary },
+	{ ImNodesCol_MiniMapBackground, kUiPalette.background },
+	{ ImNodesCol_MiniMapBackgroundHovered, kUiPalette.background },
+	{ ImNodesCol_MiniMapOutline, kUiPalette.border },
+	{ ImNodesCol_MiniMapOutlineHovered, kUiPalette.border },
+	{ ImNodesCol_MiniMapNodeBackground, kUiPalette.surface },
+	{ ImNodesCol_MiniMapNodeBackgroundHovered, kUiPalette.border },
+	{ ImNodesCol_MiniMapNodeBackgroundSelected, kUiPalette.rule },
+	{ ImNodesCol_MiniMapNodeOutline, kUiPalette.border },
+	{ ImNodesCol_MiniMapLink, kUiPalette.dim },
+	{ ImNodesCol_MiniMapLinkSelected, kUiPalette.accent },
+	{ ImNodesCol_MiniMapCanvas, IM_COL32(215, 164, 95, 20) },
+	{ ImNodesCol_MiniMapCanvasOutline, kUiPalette.accent },
+};
+
+// square corners, hairline borders, tight padding
+constexpr ImplUiThemeVar kUiThemeVars[] = {
+	{ ImNodesStyleVar_GridSpacing, 24.0f },
+	{ ImNodesStyleVar_NodeCornerRounding, 0.0f },
+	{ ImNodesStyleVar_NodeBorderThickness, 1.0f },
+	{ ImNodesStyleVar_LinkThickness, 1.5f },
+	{ ImNodesStyleVar_PinCircleRadius, 3.5f },
+	{ ImNodesStyleVar_PinQuadSideLength, 6.5f },
+	{ ImNodesStyleVar_PinTriangleSideLength, 8.0f },
+	{ ImNodesStyleVar_PinLineThickness, 1.0f },
+};
+
+constexpr ImVec2 kUiThemeNodePadding = ImVec2(8.0f, 4.0f);
+
+// wraps BeginNodeEditor/EndNodeEditor; the theme only applies to the editor
+static auto impl_ui_theme_push() -> void
+{
+	for (ImplUiThemeColor const & c : kUiThemeColors) {
+		ImNodes::PushColorStyle(c.col, c.color);
+	}
+	for (ImplUiThemeVar const & v : kUiThemeVars) {
+		ImNodes::PushStyleVar(v.var, v.value);
+	}
+	ImNodes::PushStyleVar(ImNodesStyleVar_NodePadding, kUiThemeNodePadding);
+	ImGui::PushStyleColor(ImGuiCol_Text, kUiPalette.text);
+}
+
+static auto impl_ui_theme_pop() -> void
+{
+	ImGui::PopStyleColor();
+	ImNodes::PopStyleVar(static_cast<int>(std::size(kUiThemeVars)) + 1);
+	for (size_t i = 0; i < std::size(kUiThemeColors); ++i) {
+		ImNodes::PopColorStyle();
+	}
+}
+
+static auto impl_ui_text(
+	ImU32 const color,
+	char const * const text
+) -> void
+{
+	ImGui::PushStyleColor(ImGuiCol_Text, color);
+	ImGui::TextUnformatted(text);
+	ImGui::PopStyleColor();
+}
+
+// -----------------------------------------------------------------------------
 // -- ui impl: colors
 // -----------------------------------------------------------------------------
 
@@ -708,15 +827,15 @@ static auto impl_ui_kind_style(
 	ImNodesPinShape shape = ImNodesPinShape_CircleFilled;
 	switch (kind) {
 		case rg::PinKind::image:
-			color = IM_COL32(86, 156, 214, 255);
+			color = kUiPalette.secondary;
 			shape = ImNodesPinShape_CircleFilled;
 			break;
 		case rg::PinKind::buffer:
-			color = IM_COL32(220, 150, 70, 255);
+			color = kUiPalette.accent;
 			shape = ImNodesPinShape_QuadFilled;
 			break;
 		case rg::PinKind::externalImage:
-			color = IM_COL32(160, 120, 220, 255);
+			color = kUiPalette.tertiary;
 			shape = ImNodesPinShape_TriangleFilled;
 			break;
 	}
@@ -749,6 +868,26 @@ constexpr float kUiTemporalLinkAlpha = 0.4f;
 // -- ui impl: node drawing
 // -----------------------------------------------------------------------------
 
+// the dim line under a pin; only images have a format worth showing
+static auto impl_ui_pin_detail(
+	rg::PinDesc const & pin
+) -> char const *
+{
+	if (pin.kind == rg::PinKind::buffer) { return nullptr; }
+	return impl_to_string(
+		pin.dir == rg::PinDir::in ? pin.pinIn.format : pin.pinOut.format
+	);
+}
+
+static auto impl_ui_text_width(
+	char const * const text
+) -> float
+{
+	return text ? ImGui::CalcTextSize(text).x : 0.0f;
+}
+
+// Statusline title (name left, queue right), then one row per pin index:
+// input i on the left, output i on the right, each with a dim format line.
 static auto impl_ui_draw_node(
 	ImplGraph const & graph,
 	ImplNodeInstance const & node
@@ -756,6 +895,35 @@ static auto impl_ui_draw_node(
 {
 	rg::NodeTypeCi const & nodeType = impl_node_type(node.type);
 	int const nodeId = static_cast<int>(node.id);
+	char const * const name = impl_ui_node_name(node);
+	char const * const queue = impl_to_string(nodeType.queue);
+	size_t const numIn = nodeType.pinIn.size();
+	size_t const numOut = nodeType.pinOut.size();
+	size_t const numRows = std::max(numIn, numOut);
+
+	// -- measure; columns are separated by at least a gap
+	float const gap = impl_ui_text_width("    ");
+	float width = impl_ui_text_width(name) + gap + impl_ui_text_width(queue);
+	for (size_t row = 0; row < numRows; ++row) {
+		rg::PinDesc const * const pinIn = row < numIn ? &nodeType.pinIn[row] : nullptr;
+		rg::PinDesc const * const pinOut = row < numOut ? &nodeType.pinOut[row] : nullptr;
+		float const nameWidth = (
+			(pinIn ? impl_ui_text_width(pinIn->name.c_str()) : 0.0f)
+			+ gap
+			+ (pinOut ? impl_ui_text_width(pinOut->name.c_str()) : 0.0f)
+		);
+		float const detailWidth = (
+			(pinIn ? impl_ui_text_width(impl_ui_pin_detail(*pinIn)) : 0.0f)
+			+ gap
+			+ (pinOut ? impl_ui_text_width(impl_ui_pin_detail(*pinOut)) : 0.0f)
+		);
+		width = std::max(width, std::max(nameWidth, detailWidth));
+	}
+
+	bool const selected = ImNodes::IsNodeSelected(nodeId);
+	if (selected) {
+		ImNodes::PushColorStyle(ImNodesCol_NodeOutline, kUiPalette.accent);
+	}
 	ImNodes::BeginNode(nodeId);
 
 	if (graph.positionsDirty) {
@@ -765,47 +933,89 @@ static auto impl_ui_draw_node(
 		);
 	}
 
+	// -- title
 	ImNodes::BeginNodeTitleBar();
-	ImGui::TextUnformatted(impl_ui_node_name(node));
+	{
+		ImVec2 const start = ImGui::GetCursorScreenPos();
+		impl_ui_text(kUiPalette.accent, name);
+		ImGui::SetCursorScreenPos(
+			ImVec2(start.x + width - impl_ui_text_width(queue), start.y)
+		);
+		impl_ui_text(kUiPalette.dim, queue);
+	}
 	ImNodes::EndNodeTitleBar();
 
-	ImGui::Dummy(ImVec2(0.0f, 5.0f));
+	// -- rows
+	float const left = ImGui::GetCursorScreenPos().x;
+	float const right = left + width;
+	float const lineStep = ImGui::GetTextLineHeightWithSpacing();
+	float y = ImGui::GetCursorScreenPos().y;
+	for (size_t row = 0; row < numRows; ++row) {
+		uint32_t const index = static_cast<uint32_t>(row);
+		rg::PinDesc const * const pinIn = row < numIn ? &nodeType.pinIn[row] : nullptr;
+		rg::PinDesc const * const pinOut = row < numOut ? &nodeType.pinOut[row] : nullptr;
 
-	// -- render input pins; previous-frame inputs are hollow
-	for (uint32_t i = 0; i < nodeType.pinIn.size(); ++i) {
-		rg::PinDesc const & pin = nodeType.pinIn[i];
-		ImplUiKindStyle const style = impl_ui_kind_style(pin.kind);
-		bool const temporal = (
-			pin.pinIn.temporal == rg::PinResourceTemporal::previousFrame
-		);
-		ImNodes::PushColorStyle(ImNodesCol_Pin, style.color);
-		ImNodes::PushColorStyle(ImNodesCol_PinHovered, style.hovered);
-		ImNodes::BeginInputAttribute(
-			impl_ui_pin_id(node.id, rg::PinDir::in, i),
-			temporal ? impl_ui_pin_shape_hollow(style.shape) : style.shape
-		);
-		ImGui::TextUnformatted(pin.name.c_str());
-		ImNodes::EndInputAttribute();
-		ImNodes::PopColorStyle();
-		ImNodes::PopColorStyle();
+		// previous-frame inputs are hollow
+		if (pinIn) {
+			ImplUiKindStyle const style = impl_ui_kind_style(pinIn->kind);
+			bool const temporal = (
+				pinIn->pinIn.temporal == rg::PinResourceTemporal::previousFrame
+			);
+			ImGui::SetCursorScreenPos(ImVec2(left, y));
+			ImNodes::PushColorStyle(ImNodesCol_Pin, style.color);
+			ImNodes::PushColorStyle(ImNodesCol_PinHovered, style.hovered);
+			ImNodes::BeginInputAttribute(
+				impl_ui_pin_id(node.id, rg::PinDir::in, index),
+				temporal ? impl_ui_pin_shape_hollow(style.shape) : style.shape
+			);
+			ImGui::TextUnformatted(pinIn->name.c_str());
+			ImNodes::EndInputAttribute();
+			ImNodes::PopColorStyle();
+			ImNodes::PopColorStyle();
+		}
+
+		if (pinOut) {
+			ImplUiKindStyle const style = impl_ui_kind_style(pinOut->kind);
+			float const nameWidth = impl_ui_text_width(pinOut->name.c_str());
+			ImGui::SetCursorScreenPos(ImVec2(right - nameWidth, y));
+			ImNodes::PushColorStyle(ImNodesCol_Pin, style.color);
+			ImNodes::PushColorStyle(ImNodesCol_PinHovered, style.hovered);
+			ImNodes::BeginOutputAttribute(
+				impl_ui_pin_id(node.id, rg::PinDir::out, index), style.shape
+			);
+			ImGui::TextUnformatted(pinOut->name.c_str());
+			ImNodes::EndOutputAttribute();
+			ImNodes::PopColorStyle();
+			ImNodes::PopColorStyle();
+		}
+		y += lineStep;
+
+		// -- detail line; skipped when neither side has one
+		char const * const detailIn = pinIn ? impl_ui_pin_detail(*pinIn) : nullptr;
+		char const * const detailOut = pinOut ? impl_ui_pin_detail(*pinOut) : nullptr;
+		if (detailIn) {
+			ImGui::SetCursorScreenPos(ImVec2(left, y));
+			impl_ui_text(kUiPalette.dim, detailIn);
+		}
+		if (detailOut) {
+			ImGui::SetCursorScreenPos(
+				ImVec2(right - impl_ui_text_width(detailOut), y)
+			);
+			impl_ui_text(kUiPalette.dim, detailOut);
+		}
+		if (detailIn || detailOut) {
+			y += lineStep;
+		}
 	}
 
-	// -- render output pins
-	for (uint32_t i = 0; i < nodeType.pinOut.size(); ++i) {
-		rg::PinDesc const & pin = nodeType.pinOut[i];
-		ImplUiKindStyle const style = impl_ui_kind_style(pin.kind);
-		ImNodes::PushColorStyle(ImNodesCol_Pin, style.color);
-		ImNodes::PushColorStyle(ImNodesCol_PinHovered, style.hovered);
-		ImNodes::BeginOutputAttribute(
-			impl_ui_pin_id(node.id, rg::PinDir::out, i), style.shape
-		);
-		ImGui::TextUnformatted(pin.name.c_str());
-		ImNodes::EndOutputAttribute();
-		ImNodes::PopColorStyle();
-		ImNodes::PopColorStyle();
-	}
+	// imgui needs an item after moving the cursor to extend the node's bounds
+	ImGui::SetCursorScreenPos(ImVec2(left, y));
+	ImGui::Dummy(ImVec2(width, 0.0f));
 
 	ImNodes::EndNode();
+	if (selected) {
+		ImNodes::PopColorStyle();
+	}
 }
 
 static auto impl_ui_draw_rendergraph(
@@ -1206,8 +1416,12 @@ auto rg::ui_draw(
 {
 	ImplGraph & graph = impl_graph(hGraph);
 
+	ImGui::PushStyleColor(ImGuiCol_WindowBg, kUiPalette.background);
 	ImGui::Begin("Render Graph");
+	ImGui::PopStyleColor();
 	ImNodes::EditorContextSet(graph.editor);
+
+	impl_ui_theme_push();
 	ImNodes::BeginNodeEditor();
 	impl_ui_draw_rendergraph(graph);
 	graph.positionsDirty = false;
@@ -1216,6 +1430,7 @@ auto rg::ui_draw(
 	ImNodes::MiniMap(0.2f, ImNodesMiniMapLocation_BottomRight);
 
 	ImNodes::EndNodeEditor();
+	impl_ui_theme_pop();
 
 	impl_ui_handle_input(hGraph);
 	ImGui::End();
