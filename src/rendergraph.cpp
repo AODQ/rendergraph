@@ -1061,7 +1061,7 @@ static auto impl_ui_draw_rendergraph(
 // -- ui impl: properties popup
 // -----------------------------------------------------------------------------
 
-static auto impl_ui_open_properties(
+static auto impl_ui_node_open_properties(
 	ImplGraph & graph,
 	uint32_t const nodeId
 ) -> void
@@ -1202,141 +1202,12 @@ static auto impl_ui_draw_properties(
 // -- ui impl: input
 // -----------------------------------------------------------------------------
 
-// Interaction queries; imnodes answers node/link queries only after
-// EndNodeEditor, but editor hover only inside it, so that's passed in.
-static auto impl_ui_handle_input(
+static auto impl_ui_handle_context_menu(
 	rg::Graph const hGraph,
 	bool const editorHovered
 ) -> void
 {
 	ImplGraph & graph = impl_graph(hGraph);
-	ImGuiIO const & io = ImGui::GetIO();
-
-	// -- created links; dropping onto a linked input replaces its link
-	{
-		int startedId = 0;
-		int endedId = 0;
-		if (ImNodes::IsLinkCreated(&startedId, &endedId)) {
-			ImplUiPin a = impl_ui_pin_decode(startedId);
-			ImplUiPin b = impl_ui_pin_decode(endedId);
-			if (a.dir == rg::PinDir::in) { std::swap(a, b); }
-			bool const valid = (
-				a.dir == rg::PinDir::out && b.dir == rg::PinDir::in
-				&& impl_link_check(graph, a.nodeId, a.index, b.nodeId, b.index, true)
-			);
-			if (valid) {
-				rg::transaction_begin(hGraph);
-				if (ImplLink const * old = impl_link_find_into(graph, b.nodeId, b.index)) {
-					rg::link_destroy(hGraph, { old->id });
-				}
-				rg::node_instance_link(
-					hGraph, { a.nodeId }, a.index, { b.nodeId }, b.index
-				);
-				rg::transaction_end(hGraph);
-			}
-		}
-	}
-
-	// -- left click on a node (without dragging it) opens its properties
-	{
-		bool const modifier = io.KeyShift || io.KeyCtrl || io.KeySuper;
-		if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-			int nodeId = 0;
-			int pinId = 0;
-			bool const onNode = (
-				ImNodes::IsNodeHovered(&nodeId) && !ImNodes::IsPinHovered(&pinId)
-			);
-			graph.ui.pressNode = onNode && !modifier ? static_cast<uint32_t>(nodeId) : 0;
-		}
-		if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && graph.ui.pressNode) {
-			float const threshold = io.MouseDragThreshold;
-			if (io.MouseDragMaxDistanceSqr[0] < threshold * threshold) {
-				impl_ui_open_properties(graph, graph.ui.pressNode);
-			}
-			graph.ui.pressNode = 0;
-		}
-	}
-
-	// -- node moves; recorded once the drag ends
-	if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-		rg::transaction_begin(hGraph);
-		for (auto const & [id, node] : graph.state.nodes) {
-			ImVec2 const pos = ImNodes::GetNodeGridSpacePos(static_cast<int>(id));
-			rg::node_instance_set_position(
-				hGraph,
-				{ id },
-				static_cast<int32_t>(std::lround(pos.x)),
-				static_cast<int32_t>(std::lround(pos.y))
-			);
-		}
-		rg::transaction_end(hGraph);
-		// setting positions only mirrors imnodes; nothing to push back
-		graph.positionsDirty = false;
-	}
-
-	// -- delete selection
-	bool const deletePressed = (
-		ImGui::Shortcut(ImGuiKey_Delete) || ImGui::Shortcut(ImGuiKey_Backspace)
-	);
-	if (deletePressed) {
-		int const numLinks = ImNodes::NumSelectedLinks();
-		int const numNodes = ImNodes::NumSelectedNodes();
-		std::vector<int> links(static_cast<size_t>(numLinks));
-		std::vector<int> nodes(static_cast<size_t>(numNodes));
-		if (numLinks > 0) { ImNodes::GetSelectedLinks(links.data()); }
-		if (numNodes > 0) { ImNodes::GetSelectedNodes(nodes.data()); }
-
-		rg::transaction_begin(hGraph);
-		for (int const id : links) {
-			rg::link_destroy(hGraph, { static_cast<uint32_t>(id) });
-		}
-		for (int const id : nodes) {
-			rg::node_instance_destroy(hGraph, { static_cast<uint32_t>(id) });
-		}
-		rg::transaction_end(hGraph);
-		ImNodes::ClearLinkSelection();
-		ImNodes::ClearNodeSelection();
-	}
-
-	// -- undo/redo; ImGuiMod_Ctrl is cmd on macOS
-	{
-		bool changed = false;
-		if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Z)) {
-			changed = rg::undo(hGraph);
-		}
-		if (
-			ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z)
-			|| ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Y)
-		) {
-			changed = rg::redo(hGraph);
-		}
-		if (changed) {
-			ImNodes::ClearLinkSelection();
-			ImNodes::ClearNodeSelection();
-		}
-	}
-
-	// -- WASD panning, while the editor has focus and nothing takes text
-	{
-		bool const focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
-		bool const modifier = io.KeyCtrl || io.KeySuper || io.KeyAlt;
-		if (focused && !modifier && !io.WantTextInput) {
-			float const speed = 800.0f * io.DeltaTime; // pixels per second
-			ImVec2 delta = ImVec2(0.0f, 0.0f);
-			if (ImGui::IsKeyDown(ImGuiKey_W)) { delta.y += speed; }
-			if (ImGui::IsKeyDown(ImGuiKey_S)) { delta.y -= speed; }
-			if (ImGui::IsKeyDown(ImGuiKey_A)) { delta.x += speed; }
-			if (ImGui::IsKeyDown(ImGuiKey_D)) { delta.x -= speed; }
-			if (delta.x != 0.0f || delta.y != 0.0f) {
-				ImVec2 const panning = ImNodes::EditorContextGetPanning();
-				ImNodes::EditorContextResetPanning(
-					ImVec2(panning.x + delta.x, panning.y + delta.y)
-				);
-			}
-		}
-	}
-
-	// -- right click menus; links and nodes take priority over the canvas
 	if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
 		int linkId = 0;
 		int nodeId = 0;
@@ -1370,9 +1241,8 @@ static auto impl_ui_handle_input(
 		}
 		ImGui::EndPopup();
 	}
-	// opened outside the menu so it isn't a child of the closing popup
 	if (openProperties) {
-		impl_ui_open_properties(graph, graph.ui.contextNode);
+		impl_ui_node_open_properties(graph, graph.ui.contextNode);
 	}
 
 	if (ImGui::BeginPopup("rg_context_menu")) {
@@ -1404,7 +1274,146 @@ static auto impl_ui_handle_input(
 		}
 		ImGui::EndPopup();
 	}
+}
 
+// Interaction queries; imnodes answers node/link queries only after
+// EndNodeEditor, but editor hover only inside it, so that's passed in.
+static auto impl_ui_handle_input(
+	rg::Graph const hGraph,
+	bool const editorHovered
+) -> void
+{
+	ImplGraph & graph = impl_graph(hGraph);
+	ImGuiIO const & io = ImGui::GetIO();
+
+	// -- created links
+	{
+		int startedId = 0;
+		int endedId = 0;
+		if (ImNodes::IsLinkCreated(&startedId, &endedId)) {
+			ImplUiPin a = impl_ui_pin_decode(startedId);
+			ImplUiPin b = impl_ui_pin_decode(endedId);
+			if (a.dir == rg::PinDir::in) { std::swap(a, b); }
+			bool const valid = (
+				a.dir == rg::PinDir::out && b.dir == rg::PinDir::in
+				&& impl_link_check(graph, a.nodeId, a.index, b.nodeId, b.index, true)
+			);
+			if (valid) {
+				rg::transaction_begin(hGraph);
+				if (ImplLink const * old = impl_link_find_into(graph, b.nodeId, b.index)) {
+					rg::link_destroy(hGraph, { old->id });
+				}
+				rg::node_instance_link(
+					hGraph, { a.nodeId }, a.index, { b.nodeId }, b.index
+				);
+				rg::transaction_end(hGraph);
+			}
+		}
+	}
+
+	// -- node properties
+	{
+		bool const modifier = io.KeyShift || io.KeyCtrl || io.KeySuper;
+		if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+			int nodeId = 0;
+			int pinId = 0;
+			bool const onNode = (
+				ImNodes::IsNodeHovered(&nodeId) && !ImNodes::IsPinHovered(&pinId)
+			);
+			graph.ui.pressNode = onNode && !modifier ? static_cast<uint32_t>(nodeId) : 0;
+		}
+		if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && graph.ui.pressNode) {
+			float const threshold = io.MouseDragThreshold;
+			if (io.MouseDragMaxDistanceSqr[0] < threshold * threshold) {
+				impl_ui_node_open_properties(graph, graph.ui.pressNode);
+			}
+			graph.ui.pressNode = 0;
+		}
+	}
+
+	// -- node translation
+	if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+		rg::transaction_begin(hGraph);
+		for (auto const & [id, node] : graph.state.nodes) {
+			ImVec2 const pos = ImNodes::GetNodeGridSpacePos(static_cast<int>(id));
+			rg::node_instance_set_position(
+				hGraph,
+				{ id },
+				static_cast<int32_t>(std::lround(pos.x)),
+				static_cast<int32_t>(std::lround(pos.y))
+			);
+		}
+		rg::transaction_end(hGraph);
+		// setting positions only mirrors imnodes; nothing to push back
+		graph.positionsDirty = false;
+	}
+
+	// -- selection deleted
+	bool const deletePressed = (
+		ImGui::Shortcut(ImGuiKey_Delete) || ImGui::Shortcut(ImGuiKey_Backspace)
+	);
+	if (deletePressed) {
+		int const numLinks = ImNodes::NumSelectedLinks();
+		int const numNodes = ImNodes::NumSelectedNodes();
+		std::vector<int> links(static_cast<size_t>(numLinks));
+		std::vector<int> nodes(static_cast<size_t>(numNodes));
+		if (numLinks > 0) { ImNodes::GetSelectedLinks(links.data()); }
+		if (numNodes > 0) { ImNodes::GetSelectedNodes(nodes.data()); }
+
+		rg::transaction_begin(hGraph);
+		for (int const id : links) {
+			rg::link_destroy(hGraph, { static_cast<uint32_t>(id) });
+		}
+		for (int const id : nodes) {
+			rg::node_instance_destroy(hGraph, { static_cast<uint32_t>(id) });
+		}
+		rg::transaction_end(hGraph);
+		ImNodes::ClearLinkSelection();
+		ImNodes::ClearNodeSelection();
+	}
+
+	// -- undo/redo
+	{
+		bool changed = false;
+		if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Z)) {
+			changed = rg::undo(hGraph);
+		}
+		if (
+			ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z)
+			|| ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Y)
+		) {
+			changed = rg::redo(hGraph);
+		}
+		if (changed) {
+			ImNodes::ClearLinkSelection();
+			ImNodes::ClearNodeSelection();
+		}
+	}
+
+	// -- WASD panning
+	{
+		bool const focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
+		bool const modifier = io.KeyCtrl || io.KeySuper || io.KeyAlt;
+		if (focused && !modifier && !io.WantTextInput) {
+			float const speed = 800.0f * io.DeltaTime; // pixels per second
+			ImVec2 delta = ImVec2(0.0f, 0.0f);
+			if (ImGui::IsKeyDown(ImGuiKey_W)) { delta.y += speed; }
+			if (ImGui::IsKeyDown(ImGuiKey_S)) { delta.y -= speed; }
+			if (ImGui::IsKeyDown(ImGuiKey_A)) { delta.x += speed; }
+			if (ImGui::IsKeyDown(ImGuiKey_D)) { delta.x -= speed; }
+			if (delta.x != 0.0f || delta.y != 0.0f) {
+				ImVec2 const panning = ImNodes::EditorContextGetPanning();
+				ImNodes::EditorContextResetPanning(
+					ImVec2(panning.x + delta.x, panning.y + delta.y)
+				);
+			}
+		}
+	}
+
+	// -- right click menus
+	impl_ui_handle_context_menu(hGraph, editorHovered);
+
+	// -- draw properties
 	impl_ui_draw_properties(hGraph);
 }
 
