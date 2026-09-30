@@ -662,6 +662,90 @@ static auto impl_ui_parameter_value_text(
 }
 
 // -----------------------------------------------------------------------------
+// -- ui impl: colors
+// -----------------------------------------------------------------------------
+
+namespace
+{
+	struct ImplUiKindStyle {
+		ImU32 color;
+		ImU32 hovered;
+		ImU32 selected;
+		ImNodesPinShape shape;
+	};
+}
+
+// moves each channel toward white by t (0..1), keeping alpha
+static auto impl_ui_color_lighten(
+	ImU32 const color,
+	float const t
+) -> ImU32
+{
+	ImVec4 c = ImGui::ColorConvertU32ToFloat4(color);
+	c.x += (1.0f - c.x) * t;
+	c.y += (1.0f - c.y) * t;
+	c.z += (1.0f - c.z) * t;
+	return ImGui::ColorConvertFloat4ToU32(c);
+}
+
+static auto impl_ui_color_alpha(
+	ImU32 const color,
+	float const alpha
+) -> ImU32
+{
+	ImVec4 c = ImGui::ColorConvertU32ToFloat4(color);
+	c.w *= alpha;
+	return ImGui::ColorConvertFloat4ToU32(c);
+}
+
+// pins and links are styled by the resource kind they carry; the shape keeps
+// kinds distinguishable without relying on color alone
+static auto impl_ui_kind_style(
+	rg::PinKind const kind
+) -> ImplUiKindStyle
+{
+	ImU32 color = 0;
+	ImNodesPinShape shape = ImNodesPinShape_CircleFilled;
+	switch (kind) {
+		case rg::PinKind::image:
+			color = IM_COL32(86, 156, 214, 255);
+			shape = ImNodesPinShape_CircleFilled;
+			break;
+		case rg::PinKind::buffer:
+			color = IM_COL32(220, 150, 70, 255);
+			shape = ImNodesPinShape_QuadFilled;
+			break;
+		case rg::PinKind::externalImage:
+			color = IM_COL32(160, 120, 220, 255);
+			shape = ImNodesPinShape_TriangleFilled;
+			break;
+	}
+	return {
+		.color = color,
+		.hovered = impl_ui_color_lighten(color, 0.35f),
+		.selected = impl_ui_color_lighten(color, 0.6f),
+		.shape = shape,
+	};
+}
+
+// filled shapes have an outline-only counterpart one enum value below
+static auto impl_ui_pin_shape_hollow(
+	ImNodesPinShape const shape
+) -> ImNodesPinShape
+{
+	switch (shape) {
+		case ImNodesPinShape_CircleFilled: return ImNodesPinShape_Circle;
+		case ImNodesPinShape_TriangleFilled: return ImNodesPinShape_Triangle;
+		case ImNodesPinShape_QuadFilled: return ImNodesPinShape_Quad;
+		default: return shape;
+	}
+}
+
+// previous-frame links point "backwards" in the graph; draw them fainter so
+// they don't read as cycles
+constexpr float kUiTemporalLinkAlpha = 0.4f;
+
+// -----------------------------------------------------------------------------
 // -- ui impl: node drawing
 // -----------------------------------------------------------------------------
 
@@ -687,18 +771,38 @@ static auto impl_ui_draw_node(
 
 	ImGui::Dummy(ImVec2(0.0f, 5.0f));
 
-	// -- render input pins
+	// -- render input pins; previous-frame inputs are hollow
 	for (uint32_t i = 0; i < nodeType.pinIn.size(); ++i) {
-		ImNodes::BeginInputAttribute(impl_ui_pin_id(node.id, rg::PinDir::in, i));
-		ImGui::TextUnformatted(nodeType.pinIn[i].name.c_str());
+		rg::PinDesc const & pin = nodeType.pinIn[i];
+		ImplUiKindStyle const style = impl_ui_kind_style(pin.kind);
+		bool const temporal = (
+			pin.pinIn.temporal == rg::PinResourceTemporal::previousFrame
+		);
+		ImNodes::PushColorStyle(ImNodesCol_Pin, style.color);
+		ImNodes::PushColorStyle(ImNodesCol_PinHovered, style.hovered);
+		ImNodes::BeginInputAttribute(
+			impl_ui_pin_id(node.id, rg::PinDir::in, i),
+			temporal ? impl_ui_pin_shape_hollow(style.shape) : style.shape
+		);
+		ImGui::TextUnformatted(pin.name.c_str());
 		ImNodes::EndInputAttribute();
+		ImNodes::PopColorStyle();
+		ImNodes::PopColorStyle();
 	}
 
 	// -- render output pins
 	for (uint32_t i = 0; i < nodeType.pinOut.size(); ++i) {
-		ImNodes::BeginOutputAttribute(impl_ui_pin_id(node.id, rg::PinDir::out, i));
-		ImGui::TextUnformatted(nodeType.pinOut[i].name.c_str());
+		rg::PinDesc const & pin = nodeType.pinOut[i];
+		ImplUiKindStyle const style = impl_ui_kind_style(pin.kind);
+		ImNodes::PushColorStyle(ImNodesCol_Pin, style.color);
+		ImNodes::PushColorStyle(ImNodesCol_PinHovered, style.hovered);
+		ImNodes::BeginOutputAttribute(
+			impl_ui_pin_id(node.id, rg::PinDir::out, i), style.shape
+		);
+		ImGui::TextUnformatted(pin.name.c_str());
 		ImNodes::EndOutputAttribute();
+		ImNodes::PopColorStyle();
+		ImNodes::PopColorStyle();
 	}
 
 	ImNodes::EndNode();
@@ -713,13 +817,33 @@ static auto impl_ui_draw_rendergraph(
 		impl_ui_draw_node(graph, node);
 	}
 
-	// -- render links
+	// -- render links; colored by the resource kind the output produces
 	for (ImplLink const & link : graph.state.links) {
+		ImplNodeInstance const & nodeA = graph.state.nodes.at(link.nodeA);
+		ImplNodeInstance const & nodeB = graph.state.nodes.at(link.nodeB);
+		rg::PinDesc const & pinA = impl_node_type(nodeA.type).pinOut[link.pinA];
+		rg::PinDesc const & pinB = impl_node_type(nodeB.type).pinIn[link.pinB];
+		ImplUiKindStyle const style = impl_ui_kind_style(pinA.kind);
+		float const alpha = (
+			pinB.pinIn.temporal == rg::PinResourceTemporal::previousFrame
+			? kUiTemporalLinkAlpha
+			: 1.0f
+		);
+		ImNodes::PushColorStyle(
+			ImNodesCol_Link, impl_ui_color_alpha(style.color, alpha)
+		);
+		ImNodes::PushColorStyle(
+			ImNodesCol_LinkHovered, impl_ui_color_alpha(style.hovered, alpha)
+		);
+		ImNodes::PushColorStyle(ImNodesCol_LinkSelected, style.selected);
 		ImNodes::Link(
 			static_cast<int>(link.id),
 			impl_ui_pin_id(link.nodeA, rg::PinDir::out, link.pinA),
 			impl_ui_pin_id(link.nodeB, rg::PinDir::in, link.pinB)
 		);
+		ImNodes::PopColorStyle();
+		ImNodes::PopColorStyle();
+		ImNodes::PopColorStyle();
 	}
 }
 
