@@ -133,50 +133,113 @@ namespace rg
 		std::vector<ParameterDesc> parameters;
 	};
 
+	// handles; id 0 is always invalid
 	struct NodeType { uint32_t id; };
+	struct Graph { uint32_t id; };
+	struct Link { uint32_t id; };
 
 	struct NodeInstance {
 		uint32_t id;
 		NodeType type;
 	};
 
+	// --------------------------------------------------------------------------
+	// -- node types
+	// --------------------------------------------------------------------------
+
+	// The node-types are code-driven and process-wide; they are shared by all
+	// graphs. Expectation is all node types are registered before loading
+	// anything from file.
+	NodeType register_node_type(NodeTypeCi const & ci);
+
+	// returns { 0 } if not registered
+	NodeType node_type_find(std::string const & uniqueName);
+
+	// --------------------------------------------------------------------------
+	// -- graph
+	// --------------------------------------------------------------------------
+
+	// requires the ImNodes context to exist
+	Graph graph_create();
+	void graph_destroy(Graph const graph);
+
+	// --------------------------------------------------------------------------
+	// -- edits
+	// --------------------------------------------------------------------------
+
+	// Every mutation of a graph goes through these, and each one is recorded as
+	// one undo step. Wrap several edits in a transaction to make them one step.
+
 	// typically won't have to call this when using the rendergraph api, only
-	// if generating the graph programatically
-	// TODO replace uint32_t with handle type
-	uint32_t node_instance_create(
+	// if generating the graph programatically.
+	// empty parameterValues uses the node type's defaults
+	NodeInstance node_instance_create(
+		Graph const graph,
 		std::string const & uniqueName,
 		int32_t const positionX = 0,
 		int32_t const positionY = 0,
 		std::vector<rg::ParameterValue> const & parameterValues = {}
 	);
 
+	// also destroys all links attached to the node
+	void node_instance_destroy(Graph const graph, NodeInstance const node);
+
+	void node_instance_set_position(
+		Graph const graph,
+		NodeInstance const node,
+		int32_t const positionX,
+		int32_t const positionY
+	);
+
+	// can nodeA.pinA -> nodeB.pinB be linked? pinA is an output index, pinB an
+	// input index. Fails on kind mismatch, an already-linked input, or a cycle.
+	// Links into a previous-frame input are exempt from the cycle check.
+	bool node_instance_can_link(
+		Graph const graph,
+		NodeInstance const nodeA,
+		uint32_t const pinA,
+		NodeInstance const nodeB,
+		uint32_t const pinB
+	);
+
 	// links nodeA.pinA -> nodeB.pinB
 	// pinA/pinB is the pin offset/index
-	void node_instance_link(
-		uint32_t const & hNodeA,
-		uint32_t const & pinA,
-		uint32_t const & hNodeB,
-		uint32_t const & pinB
+	// returns { 0 } if node_instance_can_link fails
+	Link node_instance_link(
+		Graph const graph,
+		NodeInstance const nodeA,
+		uint32_t const pinA,
+		NodeInstance const nodeB,
+		uint32_t const pinB
 	);
+
+	void link_destroy(Graph const graph, Link const link);
+
+	// transactions nest; only the outermost one ends the undo step
+	void transaction_begin(Graph const graph);
+	void transaction_end(Graph const graph);
+
+	// --------------------------------------------------------------------------
+	// -- undo
+	// --------------------------------------------------------------------------
+
+	bool undo(Graph const graph);
+	bool redo(Graph const graph);
+	void undo_history_clear(Graph const graph);
 
 	// --------------------------------------------------------------------------
 	// -- load/save
 	// --------------------------------------------------------------------------
 
-	// expectation is all node types are registered before loading anything from
-	// file.
-	// The node-types are code-driven while the node-instances are data-driven.
-	void register_node_type(NodeTypeCi const & ci);
+	void load_from_file(Graph const graph, std::string const & path);
+	void save_to_file(Graph const graph, std::string const & path);
 
-	void load_from_file(std::string const & path);
-	void save_to_file(std::string const & path);
-
-	// loads a demo graph for testing
-	void demo_graph();
+	// fills the graph with a demo for testing
+	void demo_graph(Graph const graph);
 
 	// --------------------------------------------------------------------------
 	// -- ui
 	// --------------------------------------------------------------------------
 
-	void ui_draw();
+	void ui_draw(Graph const graph);
 }

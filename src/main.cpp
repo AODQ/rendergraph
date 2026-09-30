@@ -33,7 +33,10 @@ int main() {
 	ImGui_ImplGlfw_InitForOpenGL(window, true);
 	ImGui_ImplOpenGL3_Init("#version 150");
 
-	rg::demo_graph();
+	rg::Graph const graph = rg::graph_create();
+	rg::demo_graph(graph);
+	// the demo is built through edits; it shouldn't be undoable
+	rg::undo_history_clear(graph);
 
 	while (!glfwWindowShouldClose(window)) {
 		glfwPollEvents();
@@ -43,7 +46,7 @@ int main() {
 
 		ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
 
-		rg::ui_draw();
+		rg::ui_draw(graph);
 
 		ImGui::Render();
 		int w, h;
@@ -55,6 +58,7 @@ int main() {
 		glfwSwapBuffers(window);
 	}
 
+	rg::graph_destroy(graph);
 	ImGui_ImplOpenGL3_Shutdown();
 	ImGui_ImplGlfw_Shutdown();
 	ImNodes::DestroyContext();
