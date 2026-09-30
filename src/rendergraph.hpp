@@ -191,8 +191,16 @@ namespace rg
 		int32_t const positionY
 	);
 
+	// empty name displays the node type's name
+	void node_instance_set_name(
+		Graph const graph,
+		NodeInstance const node,
+		std::string const & name
+	);
+
 	// can nodeA.pinA -> nodeB.pinB be linked? pinA is an output index, pinB an
-	// input index. Fails on kind mismatch, an already-linked input, or a cycle.
+	// input index. Fails on kind mismatch, an already-linked input, an
+	// already-linked output without allowMultiple, or a cycle.
 	// Links into a previous-frame input are exempt from the cycle check.
 	bool node_instance_can_link(
 		Graph const graph,

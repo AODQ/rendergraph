@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdio>
 #include <map>
 #include <memory>
 #include <unordered_map>
@@ -19,6 +20,8 @@ namespace
 	struct ImplNodeInstance {
 		uint32_t id;
 		rg::NodeType type;
+		// empty uses the node type's name
+		std::string name;
 		std::vector<rg::ParameterValue> parameterValues;
 		int32_t posX = 0;
 		int32_t posY = 0;
@@ -56,6 +59,13 @@ namespace
 		ImNodesEditorContext * editor = nullptr;
 		// model positions need to be pushed to imnodes next frame
 		bool positionsDirty = true;
+		struct {
+			uint32_t contextNode = 0; // right-clicked
+			uint32_t contextLink = 0; // right-clicked
+			uint32_t pressNode = 0; // left-pressed; opens properties on click
+			uint32_t propertiesNode = 0;
+			char nameBuffer[128] = {};
+		} ui;
 	};
 
 	constexpr size_t kUndoStackMax = 256;
@@ -82,6 +92,19 @@ static ImplNodeInstance const * impl_node_find(
 ) {
 	auto const it = g.state.nodes.find(nodeId);
 	return it == g.state.nodes.end() ? nullptr : &it->second;
+}
+
+static ImplLink const * impl_link_find_from(
+	ImplGraph const & g,
+	uint32_t const nodeA,
+	uint32_t const pinA
+) {
+	for (ImplLink const & link : g.state.links) {
+		if (link.nodeA == nodeA && link.pinA == pinA) {
+			return &link;
+		}
+	}
+	return nullptr;
 }
 
 static ImplLink const * impl_link_find_into(
@@ -173,8 +196,13 @@ static bool impl_link_check(
 	rg::PinDesc const & descB = typeB.pinIn[pinB];
 	if (!impl_pin_kinds_compatible(descA.kind, descB.kind)) { return false; }
 
-	if (!allowReplace && impl_link_find_into(g, nodeBId, pinB)) {
-		return false;
+	// with allowReplace the caller removes the conflicting links first
+	if (!allowReplace) {
+		if (impl_link_find_into(g, nodeBId, pinB)) { return false; }
+		bool const outputFull = (
+			!descA.pinOut.allowMultiple && impl_link_find_from(g, nodeAId, pinA)
+		);
+		if (outputFull) { return false; }
 	}
 
 	// a previous-frame input can't form a cycle, even with its own node
@@ -293,6 +321,18 @@ void rg::node_instance_set_position(
 	n.posY = positionY;
 }
 
+void rg::node_instance_set_name(
+	Graph const graph,
+	NodeInstance const node,
+	std::string const & name
+) {
+	ImplGraph & g = impl_graph(graph);
+	ImplNodeInstance const * const found = impl_node_find(g, node.id);
+	if (!found || found->name == name) { return; }
+	impl_edit_record(g);
+	g.state.nodes.at(node.id).name = name;
+}
+
 bool rg::node_instance_can_link(
 	Graph const graph,
 	NodeInstance const nodeA,
@@ -391,6 +431,7 @@ void rg::undo_history_clear(Graph const graph) {
 void rg::load_from_file(Graph const graph, std::string const & path) {
 }
 
+
 // -----------------------------------------------------------------------------
 // -- ui impl detail
 // -----------------------------------------------------------------------------
@@ -422,6 +463,105 @@ static ImplUiPin impl_ui_pin_decode(int const pinId) {
 	};
 }
 
+static char const * impl_ui_node_name(ImplNodeInstance const & node) {
+	return (
+		node.name.empty()
+		? impl_node_type(node.type).name.c_str()
+		: node.name.c_str()
+	);
+}
+
+static char const * impl_to_string(rg::PinKind const v) {
+	switch (v) {
+		case rg::PinKind::image: return "image";
+		case rg::PinKind::buffer: return "buffer";
+		case rg::PinKind::externalImage: return "external image";
+	}
+	return "?";
+}
+
+static char const * impl_to_string(rg::ImageFormat const v) {
+	switch (v) {
+		case rg::ImageFormat::r8: return "r8";
+		case rg::ImageFormat::r16: return "r16";
+		case rg::ImageFormat::r32f: return "r32f";
+		case rg::ImageFormat::rg8: return "rg8";
+		case rg::ImageFormat::rg16: return "rg16";
+		case rg::ImageFormat::rg32f: return "rg32f";
+		case rg::ImageFormat::rgb8: return "rgb8";
+		case rg::ImageFormat::rgb16: return "rgb16";
+		case rg::ImageFormat::rgb32f: return "rgb32f";
+		case rg::ImageFormat::rgba8: return "rgba8";
+		case rg::ImageFormat::rgba16: return "rgba16";
+		case rg::ImageFormat::rgba32f: return "rgba32f";
+	}
+	return "?";
+}
+
+static char const * impl_to_string(rg::AccessMode const v) {
+	switch (v) {
+		case rg::AccessMode::Sampled: return "sampled";
+		case rg::AccessMode::StorageRead: return "storage read";
+		case rg::AccessMode::StorageWrite: return "storage write";
+		case rg::AccessMode::ColorAttachment: return "color attachment";
+		case rg::AccessMode::DepthWrite: return "depth write";
+		case rg::AccessMode::DepthRead: return "depth read";
+		case rg::AccessMode::CopySrc: return "copy src";
+		case rg::AccessMode::CopyDst: return "copy dst";
+		case rg::AccessMode::IndirectBuffer: return "indirect buffer";
+		case rg::AccessMode::UniformBuffer: return "uniform buffer";
+	}
+	return "?";
+}
+
+static char const * impl_to_string(rg::NodeTypeQueue const v) {
+	switch (v) {
+		case rg::NodeTypeQueue::graphics: return "graphics";
+		case rg::NodeTypeQueue::compute: return "compute";
+		case rg::NodeTypeQueue::copy: return "copy";
+	}
+	return "?";
+}
+
+static void impl_ui_parameter_value_text(
+	rg::ParameterDesc const & desc,
+	rg::ParameterValue const & value
+) {
+	switch (desc.kind) {
+		case rg::ParameterKind::f32:
+			ImGui::Text(
+				"%g  [%g, %g]",
+				value.f32.value, desc.minValue.f32.value, desc.maxValue.f32.value
+			);
+			break;
+		case rg::ParameterKind::i32:
+			ImGui::Text(
+				"%d  [%d, %d]",
+				value.i32.value, desc.minValue.i32.value, desc.maxValue.i32.value
+			);
+			break;
+		case rg::ParameterKind::u32:
+			ImGui::Text(
+				"%u  [%u, %u]",
+				value.u32.value, desc.minValue.u32.value, desc.maxValue.u32.value
+			);
+			break;
+		case rg::ParameterKind::boolean:
+			ImGui::TextUnformatted(value.boolean.value ? "true" : "false");
+			break;
+		case rg::ParameterKind::enumeration: {
+			// enumeration values are stored as their u32 index
+			uint32_t const index = value.u32.value;
+			ImGui::TextUnformatted(
+				index < desc.enumValues.size()
+				? desc.enumValues[index].c_str()
+				: "<invalid>"
+			);
+			break;
+		}
+	}
+}
+
 static void impl_ui_draw_node(ImplGraph const & g, ImplNodeInstance const & node) {
 	rg::NodeTypeCi const & nodeType = impl_node_type(node.type);
 	int const nodeId = static_cast<int>(node.id);
@@ -435,7 +575,7 @@ static void impl_ui_draw_node(ImplGraph const & g, ImplNodeInstance const & node
 	}
 
 	ImNodes::BeginNodeTitleBar();
-	ImGui::TextUnformatted(nodeType.name.c_str());
+	ImGui::TextUnformatted(impl_ui_node_name(node));
 	ImNodes::EndNodeTitleBar();
 
 	ImGui::Dummy(ImVec2(0.0f, 5.0f));
@@ -473,11 +613,143 @@ static void impl_ui_draw_rendergraph(ImplGraph const & g) {
 	}
 }
 
+static void impl_ui_open_properties(ImplGraph & g, uint32_t const nodeId) {
+	ImplNodeInstance const * const node = impl_node_find(g, nodeId);
+	if (!node) { return; }
+	g.ui.propertiesNode = nodeId;
+	snprintf(g.ui.nameBuffer, sizeof(g.ui.nameBuffer), "%s", node->name.c_str());
+	ImGui::OpenPopup("rg_node_properties");
+}
+
+static void impl_ui_draw_properties(rg::Graph const graph) {
+	ImplGraph & g = impl_graph(graph);
+	if (!ImGui::BeginPopup("rg_node_properties")) { return; }
+
+	// the node can vanish under the popup, eg via undo
+	ImplNodeInstance const * const node = impl_node_find(g, g.ui.propertiesNode);
+	if (!node) {
+		ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+		return;
+	}
+	rg::NodeTypeCi const & nodeType = impl_node_type(node->type);
+	rg::NodeInstance const handle = { .id = node->id, .type = node->type };
+
+	// -- name; committed once editing finishes so a rename is one undo step
+	ImGui::SetNextItemWidth(240.0f);
+	ImGui::InputTextWithHint(
+		"name", nodeType.name.c_str(), g.ui.nameBuffer, sizeof(g.ui.nameBuffer)
+	);
+	if (ImGui::IsItemDeactivatedAfterEdit()) {
+		rg::node_instance_set_name(graph, handle, g.ui.nameBuffer);
+	}
+
+	ImGui::Text("type   %s (%s)", nodeType.name.c_str(), nodeType.uniqueName.c_str());
+	ImGui::Text("queue  %s", impl_to_string(nodeType.queue));
+	ImGui::Text("id     %u", node->id);
+
+	ImGuiTableFlags const tableFlags = (
+		ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit
+	);
+
+	// -- inputs
+	if (!nodeType.pinIn.empty()) {
+		ImGui::SeparatorText("inputs");
+		if (ImGui::BeginTable("inputs", 7, tableFlags)) {
+			for (char const * col : {
+				"name", "kind", "format", "access", "frame", "size", "linked from",
+			}) {
+				ImGui::TableSetupColumn(col);
+			}
+			ImGui::TableHeadersRow();
+			for (uint32_t i = 0; i < nodeType.pinIn.size(); ++i) {
+				rg::PinDesc const & pin = nodeType.pinIn[i];
+				bool const previous = (
+					pin.pinIn.temporal == rg::PinResourceTemporal::previousFrame
+				);
+				ImGui::TableNextRow();
+				ImGui::TableNextColumn();
+				ImGui::Text("%s%s", pin.name.c_str(), pin.pinIn.required ? "" : " (optional)");
+				ImGui::TableNextColumn(); ImGui::TextUnformatted(impl_to_string(pin.kind));
+				ImGui::TableNextColumn(); ImGui::TextUnformatted(impl_to_string(pin.pinIn.format));
+				ImGui::TableNextColumn(); ImGui::TextUnformatted(impl_to_string(pin.pinIn.accessMode));
+				ImGui::TableNextColumn(); ImGui::TextUnformatted(previous ? "previous" : "current");
+				ImGui::TableNextColumn();
+				ImGui::Text("%gx%g, %u mips", pin.scaleWidth, pin.scaleHeight, pin.mipLevels);
+				ImGui::TableNextColumn();
+				if (ImplLink const * link = impl_link_find_into(g, node->id, i)) {
+					ImplNodeInstance const & from = g.state.nodes.at(link->nodeA);
+					ImGui::Text(
+						"%s.%s",
+						impl_ui_node_name(from),
+						impl_node_type(from.type).pinOut[link->pinA].name.c_str()
+					);
+				} else {
+					ImGui::TextDisabled("-");
+				}
+			}
+			ImGui::EndTable();
+		}
+	}
+
+	// -- outputs
+	if (!nodeType.pinOut.empty()) {
+		ImGui::SeparatorText("outputs");
+		if (ImGui::BeginTable("outputs", 7, tableFlags)) {
+			for (char const * col : {
+				"name", "kind", "format", "access", "multiple", "size", "links",
+			}) {
+				ImGui::TableSetupColumn(col);
+			}
+			ImGui::TableHeadersRow();
+			for (uint32_t i = 0; i < nodeType.pinOut.size(); ++i) {
+				rg::PinDesc const & pin = nodeType.pinOut[i];
+				auto const numLinks = std::count_if(
+					g.state.links.begin(), g.state.links.end(),
+					[&](ImplLink const & l) {
+						return l.nodeA == node->id && l.pinA == i;
+					}
+				);
+				ImGui::TableNextRow();
+				ImGui::TableNextColumn(); ImGui::TextUnformatted(pin.name.c_str());
+				ImGui::TableNextColumn(); ImGui::TextUnformatted(impl_to_string(pin.kind));
+				ImGui::TableNextColumn(); ImGui::TextUnformatted(impl_to_string(pin.pinOut.format));
+				ImGui::TableNextColumn(); ImGui::TextUnformatted(impl_to_string(pin.pinOut.accessMode));
+				ImGui::TableNextColumn(); ImGui::TextUnformatted(pin.pinOut.allowMultiple ? "yes" : "no");
+				ImGui::TableNextColumn();
+				ImGui::Text("%gx%g, %u mips", pin.scaleWidth, pin.scaleHeight, pin.mipLevels);
+				ImGui::TableNextColumn(); ImGui::Text("%d", static_cast<int>(numLinks));
+			}
+			ImGui::EndTable();
+		}
+	}
+
+	// -- parameters
+	if (!nodeType.parameters.empty()) {
+		ImGui::SeparatorText("parameters");
+		if (ImGui::BeginTable("parameters", 2, tableFlags)) {
+			for (size_t i = 0; i < nodeType.parameters.size(); ++i) {
+				ImGui::TableNextRow();
+				ImGui::TableNextColumn();
+				ImGui::TextUnformatted(nodeType.parameters[i].name.c_str());
+				ImGui::TableNextColumn();
+				impl_ui_parameter_value_text(
+					nodeType.parameters[i], node->parameterValues[i]
+				);
+			}
+			ImGui::EndTable();
+		}
+	}
+
+	ImGui::EndPopup();
+}
+
 // All interaction queries; imnodes only answers these after EndNodeEditor.
 static void impl_ui_handle_input(rg::Graph const graph) {
 	ImplGraph & g = impl_graph(graph);
+	ImGuiIO const & io = ImGui::GetIO();
 
-	// -- created links; dropping onto a linked input replaces its link
+	// -- created links; replaces whatever link the new one conflicts with
 	{
 		int startedId = 0;
 		int endedId = 0;
@@ -494,11 +766,40 @@ static void impl_ui_handle_input(rg::Graph const graph) {
 				if (ImplLink const * old = impl_link_find_into(g, b.nodeId, b.index)) {
 					rg::link_destroy(graph, { old->id });
 				}
+				ImplNodeInstance const & nodeA = g.state.nodes.at(a.nodeId);
+				bool const single = (
+					!impl_node_type(nodeA.type).pinOut[a.index].pinOut.allowMultiple
+				);
+				if (single) {
+					if (ImplLink const * old = impl_link_find_from(g, a.nodeId, a.index)) {
+						rg::link_destroy(graph, { old->id });
+					}
+				}
 				rg::node_instance_link(
 					graph, { a.nodeId }, a.index, { b.nodeId }, b.index
 				);
 				rg::transaction_end(graph);
 			}
+		}
+	}
+
+	// -- left click on a node (without dragging it) opens its properties
+	{
+		bool const modifier = io.KeyShift || io.KeyCtrl || io.KeySuper;
+		if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+			int nodeId = 0;
+			int pinId = 0;
+			bool const onNode = (
+				ImNodes::IsNodeHovered(&nodeId) && !ImNodes::IsPinHovered(&pinId)
+			);
+			g.ui.pressNode = onNode && !modifier ? static_cast<uint32_t>(nodeId) : 0;
+		}
+		if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && g.ui.pressNode) {
+			float const threshold = io.MouseDragThreshold;
+			if (io.MouseDragMaxDistanceSqr[0] < threshold * threshold) {
+				impl_ui_open_properties(g, g.ui.pressNode);
+			}
+			g.ui.pressNode = 0;
 		}
 	}
 
@@ -561,13 +862,65 @@ static void impl_ui_handle_input(rg::Graph const graph) {
 		}
 	}
 
-	// -- right click menu
-	if (
-		ImNodes::IsEditorHovered()
-		&& ImGui::IsMouseClicked(ImGuiMouseButton_Right)
-	) {
-		ImGui::OpenPopup("rg_context_menu");
+	// -- WASD panning, while the editor has focus and nothing takes text
+	{
+		bool const focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
+		bool const modifier = io.KeyCtrl || io.KeySuper || io.KeyAlt;
+		if (focused && !modifier && !io.WantTextInput) {
+			float const speed = 800.0f * io.DeltaTime; // pixels per second
+			ImVec2 delta = ImVec2(0.0f, 0.0f);
+			if (ImGui::IsKeyDown(ImGuiKey_W)) { delta.y += speed; }
+			if (ImGui::IsKeyDown(ImGuiKey_S)) { delta.y -= speed; }
+			if (ImGui::IsKeyDown(ImGuiKey_A)) { delta.x += speed; }
+			if (ImGui::IsKeyDown(ImGuiKey_D)) { delta.x -= speed; }
+			if (delta.x != 0.0f || delta.y != 0.0f) {
+				ImVec2 const panning = ImNodes::EditorContextGetPanning();
+				ImNodes::EditorContextResetPanning(
+					ImVec2(panning.x + delta.x, panning.y + delta.y)
+				);
+			}
+		}
 	}
+
+	// -- right click menus; links and nodes take priority over the canvas
+	if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+		int linkId = 0;
+		int nodeId = 0;
+		if (ImNodes::IsLinkHovered(&linkId)) {
+			g.ui.contextLink = static_cast<uint32_t>(linkId);
+			ImGui::OpenPopup("rg_link_menu");
+		} else if (ImNodes::IsNodeHovered(&nodeId)) {
+			g.ui.contextNode = static_cast<uint32_t>(nodeId);
+			ImGui::OpenPopup("rg_node_menu");
+		} else if (ImNodes::IsEditorHovered()) {
+			ImGui::OpenPopup("rg_context_menu");
+		}
+	}
+
+	if (ImGui::BeginPopup("rg_link_menu")) {
+		if (ImGui::MenuItem("delete link")) {
+			rg::link_destroy(graph, { g.ui.contextLink });
+			ImNodes::ClearLinkSelection();
+		}
+		ImGui::EndPopup();
+	}
+
+	bool openProperties = false;
+	if (ImGui::BeginPopup("rg_node_menu")) {
+		if (ImGui::MenuItem("properties")) {
+			openProperties = true;
+		}
+		if (ImGui::MenuItem("delete node")) {
+			rg::node_instance_destroy(graph, { g.ui.contextNode });
+			ImNodes::ClearNodeSelection();
+		}
+		ImGui::EndPopup();
+	}
+	// opened outside the menu so it isn't a child of the closing popup
+	if (openProperties) {
+		impl_ui_open_properties(g, g.ui.contextNode);
+	}
+
 	if (ImGui::BeginPopup("rg_context_menu")) {
 		if (ImGui::BeginMenu("add node")) {
 			for (rg::NodeTypeCi const & nodeType : sImplNodeTypes) {
@@ -597,6 +950,8 @@ static void impl_ui_handle_input(rg::Graph const graph) {
 		}
 		ImGui::EndPopup();
 	}
+
+	impl_ui_draw_properties(graph);
 }
 
 // -----------------------------------------------------------------------------

@@ -43,7 +43,7 @@ static rg::PinDesc impl_pin_out(
 	rg::PinKind const kind,
 	rg::ImageFormat const format = rg::ImageFormat::rgba16,
 	rg::AccessMode const accessMode = rg::AccessMode::StorageWrite,
-	bool const allowMultiple = false,
+	bool const allowMultiple = true,
 	f32 const scaleWidth = 1.0f,
 	f32 const scaleHeight = 1.0f,
 	u32 const mipLevels = 1
@@ -272,7 +272,7 @@ static void impl_register_demo_node_types()
 					rg::PinKind::image,
 					rg::ImageFormat::r32f,
 					rg::AccessMode::StorageWrite,
-					false,
+					true,
 					1.0f,
 					1.0f,
 					8
@@ -902,7 +902,7 @@ static void impl_register_demo_node_types()
 					rg::PinKind::image,
 					rg::ImageFormat::rgba16,
 					rg::AccessMode::StorageWrite,
-					false,
+					true,
 					0.5f,
 					0.5f
 				),
