@@ -1202,9 +1202,11 @@ static auto impl_ui_draw_properties(
 // -- ui impl: input
 // -----------------------------------------------------------------------------
 
-// All interaction queries; imnodes only answers these after EndNodeEditor.
+// Interaction queries; imnodes answers node/link queries only after
+// EndNodeEditor, but editor hover only inside it, so that's passed in.
 static auto impl_ui_handle_input(
-	rg::Graph const hGraph
+	rg::Graph const hGraph,
+	bool const editorHovered
 ) -> void
 {
 	ImplGraph & graph = impl_graph(hGraph);
@@ -1344,7 +1346,7 @@ static auto impl_ui_handle_input(
 		} else if (ImNodes::IsNodeHovered(&nodeId)) {
 			graph.ui.contextNode = static_cast<uint32_t>(nodeId);
 			ImGui::OpenPopup("rg_node_menu");
-		} else if (ImNodes::IsEditorHovered()) {
+		} else if (editorHovered) {
 			ImGui::OpenPopup("rg_context_menu");
 		}
 	}
@@ -1429,9 +1431,12 @@ auto rg::ui_draw(
 	// -- minimap; imnodes needs it after all nodes and links
 	ImNodes::MiniMap(0.2f, ImNodesMiniMapLocation_BottomRight);
 
+	// checks the current window, so it must be asked while in the canvas
+	bool const editorHovered = ImNodes::IsEditorHovered();
+
 	ImNodes::EndNodeEditor();
 	impl_ui_theme_pop();
 
-	impl_ui_handle_input(hGraph);
+	impl_ui_handle_input(hGraph, editorHovered);
 	ImGui::End();
 }
