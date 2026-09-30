@@ -937,6 +937,10 @@ void rg::ui_draw(Graph const graph) {
 	ImGui::Begin("Render Graph");
 	ImNodes::EditorContextSet(g.editor);
 	ImNodes::BeginNodeEditor();
+
+	// -- minimap
+	ImNodes::MiniMap(0.2f, ImNodesMiniMapLocation_BottomRight);
+
 	impl_ui_draw_rendergraph(g);
 	g.positionsDirty = false;
 	ImNodes::EndNodeEditor();
