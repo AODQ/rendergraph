@@ -132,7 +132,11 @@ namespace rg
 		std::vector<ParameterDesc> parameters;
 	};
 
-	// handles; id 0 is always invalid
+	// --------------------------------------------------------------------------
+	// -- handles
+	// --------------------------------------------------------------------------
+
+	// id 0 is always invalid
 	struct NodeType { uint32_t id; };
 	struct Graph { uint32_t id; };
 	struct Link { uint32_t id; };
@@ -160,20 +164,14 @@ namespace rg
 
 	// requires the ImNodes context to exist
 	Graph graph_create();
-	void graph_destroy(Graph const graph);
+	void graph_destroy(Graph const hGraph);
 
 	// --------------------------------------------------------------------------
-	// -- edits
+	// -- edits: nodes
 	// --------------------------------------------------------------------------
 
-	// Every mutation of a graph goes through these, and each one is recorded as
-	// one undo step. Wrap several edits in a transaction to make them one step.
-
-	// typically won't have to call this when using the rendergraph api, only
-	// if generating the graph programatically.
-	// empty parameterValues uses the node type's defaults
 	NodeInstance node_instance_create(
-		Graph const graph,
+		Graph const hGraph,
 		std::string const & uniqueName,
 		int32_t const positionX = 0,
 		int32_t const positionY = 0,
@@ -181,71 +179,80 @@ namespace rg
 	);
 
 	// also destroys all links attached to the node
-	void node_instance_destroy(Graph const graph, NodeInstance const node);
+	void node_instance_destroy(Graph const hGraph, NodeInstance const hNode);
 
 	void node_instance_set_position(
-		Graph const graph,
-		NodeInstance const node,
+		Graph const hGraph,
+		NodeInstance const hNode,
 		int32_t const positionX,
 		int32_t const positionY
 	);
 
 	// empty name displays the node type's name
 	void node_instance_set_name(
-		Graph const graph,
-		NodeInstance const node,
+		Graph const hGraph,
+		NodeInstance const hNode,
 		std::string const & name
 	);
 
-	// can nodeA.pinA -> nodeB.pinB be linked? pinA is an output index, pinB an
-	// input index. Fails on kind mismatch, an already-linked input, or a cycle.
-	// Links into a previous-frame input are exempt from the cycle check.
+	// --------------------------------------------------------------------------
+	// -- edits: links
+	// --------------------------------------------------------------------------
+
+	// returns if hNodeA.pinA -> hNodeB.pinB can be linked.
+	// pinA is the output index of its pins, pinB is the input index of its pins.
+	// fails on kind mismatch, already-linked input or a cycle.
+	// links into a previous-frame input can be exempt from the cycle check
 	bool node_instance_can_link(
-		Graph const graph,
-		NodeInstance const nodeA,
+		Graph const hGraph,
+		NodeInstance const hNodeA,
 		uint32_t const pinA,
-		NodeInstance const nodeB,
+		NodeInstance const hNodeB,
 		uint32_t const pinB
 	);
 
-	// links nodeA.pinA -> nodeB.pinB
+	// links hNodeA.pinA -> hNodeB.pinB
 	// pinA/pinB is the pin offset/index
 	// returns { 0 } if node_instance_can_link fails
 	Link node_instance_link(
-		Graph const graph,
-		NodeInstance const nodeA,
+		Graph const hGraph,
+		NodeInstance const hNodeA,
 		uint32_t const pinA,
-		NodeInstance const nodeB,
+		NodeInstance const hNodeB,
 		uint32_t const pinB
 	);
 
-	void link_destroy(Graph const graph, Link const link);
+	void link_destroy(Graph const hGraph, Link const hLink);
+
+	// --------------------------------------------------------------------------
+	// -- edits: transactions
+	// --------------------------------------------------------------------------
 
 	// transactions nest; only the outermost one ends the undo step
-	void transaction_begin(Graph const graph);
-	void transaction_end(Graph const graph);
+	void transaction_begin(Graph const hGraph);
+	void transaction_end(Graph const hGraph);
 
 	// --------------------------------------------------------------------------
 	// -- undo
 	// --------------------------------------------------------------------------
 
-	bool undo(Graph const graph);
-	bool redo(Graph const graph);
-	void undo_history_clear(Graph const graph);
+	bool undo(Graph const hGraph);
+	bool redo(Graph const hGraph);
+	void undo_history_clear(Graph const hGraph);
 
 	// --------------------------------------------------------------------------
 	// -- load/save
 	// --------------------------------------------------------------------------
 
-	void load_from_file(Graph const graph, std::string const & path);
-	void save_to_file(Graph const graph, std::string const & path);
+	void load_from_file(Graph const hGraph, std::string const & path);
+	void save_to_file(Graph const hGraph, std::string const & path);
 
 	// fills the graph with a demo for testing
-	void demo_graph(Graph const graph);
+	void demo_graph(Graph const hGraph);
 
 	// --------------------------------------------------------------------------
 	// -- ui
 	// --------------------------------------------------------------------------
 
-	void ui_draw(Graph const graph);
+	void ui_draw(Graph const hGraph);
 }

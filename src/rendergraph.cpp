@@ -12,7 +12,7 @@
 #include <unordered_map>
 
 // -----------------------------------------------------------------------------
-// -- impl details
+// -- impl types
 // -----------------------------------------------------------------------------
 
 namespace
@@ -57,6 +57,7 @@ namespace
 
 		// ui state
 		ImNodesEditorContext * editor = nullptr;
+
 		// model positions need to be pushed to imnodes next frame
 		bool positionsDirty = true;
 		struct {
@@ -67,39 +68,53 @@ namespace
 			char nameBuffer[128] = {};
 		} ui;
 	};
-
-	constexpr size_t kUndoStackMax = 256;
 }
+
+// -----------------------------------------------------------------------------
+// -- impl state
+// -----------------------------------------------------------------------------
+
+static constexpr size_t kUndoStackMax = 256;
 
 static std::vector<rg::NodeTypeCi> sImplNodeTypes; // indexed by id - 1
 static std::unordered_map<std::string, uint32_t> sImplNodeTypeUniqueNameToId;
 static std::unordered_map<uint32_t, std::unique_ptr<ImplGraph>> sImplGraphs;
 
 // -----------------------------------------------------------------------------
+// -- impl lookup
+// -----------------------------------------------------------------------------
 
-static rg::NodeTypeCi const & impl_node_type(rg::NodeType const type) {
-	assert(type.id > 0 && type.id <= sImplNodeTypes.size());
-	return sImplNodeTypes[type.id - 1];
+static auto impl_node_type(
+	rg::NodeType const hType
+) -> rg::NodeTypeCi const &
+{
+	assert(hType.id > 0 && hType.id <= sImplNodeTypes.size());
+	return sImplNodeTypes[hType.id - 1];
 }
 
-static ImplGraph & impl_graph(rg::Graph const graph) {
-	return *sImplGraphs.at(graph.id);
+static auto impl_graph(
+	rg::Graph const hGraph
+) -> ImplGraph &
+{
+	return *sImplGraphs.at(hGraph.id);
 }
 
-static ImplNodeInstance const * impl_node_find(
-	ImplGraph const & g,
+static auto impl_node_find(
+	ImplGraph const & graph,
 	uint32_t const nodeId
-) {
-	auto const it = g.state.nodes.find(nodeId);
-	return it == g.state.nodes.end() ? nullptr : &it->second;
+) -> ImplNodeInstance const *
+{
+	auto const it = graph.state.nodes.find(nodeId);
+	return it == graph.state.nodes.end() ? nullptr : &it->second;
 }
 
-static ImplLink const * impl_link_find_into(
-	ImplGraph const & g,
+static auto impl_link_find_into(
+	ImplGraph const & graph,
 	uint32_t const nodeB,
 	uint32_t const pinB
-) {
-	for (ImplLink const & link : g.state.links) {
+) -> ImplLink const *
+{
+	for (ImplLink const & link : graph.state.links) {
 		if (link.nodeB == nodeB && link.pinB == pinB) {
 			return &link;
 		}
@@ -107,24 +122,39 @@ static ImplLink const * impl_link_find_into(
 	return nullptr;
 }
 
+// -----------------------------------------------------------------------------
+// -- impl undo recording
+// -----------------------------------------------------------------------------
+
 // Records an undo step before a mutation. Call only once the edit is known to
 // succeed. Inside a transaction only the first mutation records.
-static void impl_edit_record(ImplGraph & g) {
-	g.positionsDirty = true;
-	if (g.transactionDepth > 0) {
-		if (g.transactionRecorded) { return; }
-		g.transactionRecorded = true;
+static auto impl_edit_record(
+	ImplGraph & graph
+) -> void
+{
+	graph.positionsDirty = true;
+	if (graph.transactionDepth > 0) {
+		if (graph.transactionRecorded) { return; }
+		graph.transactionRecorded = true;
 	}
-	g.undoStack.push_back(g.state);
-	if (g.undoStack.size() > kUndoStackMax) {
-		g.undoStack.erase(g.undoStack.begin());
+	graph.undoStack.push_back(graph.state);
+	if (graph.undoStack.size() > kUndoStackMax) {
+		graph.undoStack.erase(graph.undoStack.begin());
 	}
-	g.redoStack.clear();
+	graph.redoStack.clear();
 }
+
+// -----------------------------------------------------------------------------
+// -- impl link validation
+// -----------------------------------------------------------------------------
 
 // images and external images are both images; where the resource comes from
 // doesn't change what can be connected
-static bool impl_pin_kinds_compatible(rg::PinKind const a, rg::PinKind const b) {
+static auto impl_pin_kinds_compatible(
+	rg::PinKind const a,
+	rg::PinKind const b
+) -> bool
+{
 	auto const isImage = [](rg::PinKind const k) {
 		return k == rg::PinKind::image || k == rg::PinKind::externalImage;
 	};
@@ -133,11 +163,12 @@ static bool impl_pin_kinds_compatible(rg::PinKind const a, rg::PinKind const b) 
 
 // is 'target' reachable from 'start' following links forward? Links into
 // previous-frame inputs are ignored, as they don't order passes within a frame.
-static bool impl_node_reachable(
-	ImplGraph const & g,
+static auto impl_node_reachable(
+	ImplGraph const & graph,
 	uint32_t const start,
 	uint32_t const target
-) {
+) -> bool
+{
 	std::vector<uint32_t> stack = { start };
 	std::vector<uint32_t> visited;
 	while (!stack.empty()) {
@@ -148,9 +179,9 @@ static bool impl_node_reachable(
 			continue;
 		}
 		visited.push_back(nodeId);
-		for (ImplLink const & link : g.state.links) {
+		for (ImplLink const & link : graph.state.links) {
 			if (link.nodeA != nodeId) { continue; }
-			ImplNodeInstance const & nodeB = g.state.nodes.at(link.nodeB);
+			ImplNodeInstance const & nodeB = graph.state.nodes.at(link.nodeB);
 			rg::PinDesc const & pinB = impl_node_type(nodeB.type).pinIn[link.pinB];
 			if (pinB.pinIn.temporal == rg::PinResourceTemporal::previousFrame) {
 				continue;
@@ -161,16 +192,17 @@ static bool impl_node_reachable(
 	return false;
 }
 
-static bool impl_link_check(
-	ImplGraph const & g,
+static auto impl_link_check(
+	ImplGraph const & graph,
 	uint32_t const nodeAId,
 	uint32_t const pinA,
 	uint32_t const nodeBId,
 	uint32_t const pinB,
 	bool const allowReplace
-) {
-	ImplNodeInstance const * const nodeA = impl_node_find(g, nodeAId);
-	ImplNodeInstance const * const nodeB = impl_node_find(g, nodeBId);
+) -> bool
+{
+	ImplNodeInstance const * const nodeA = impl_node_find(graph, nodeAId);
+	ImplNodeInstance const * const nodeB = impl_node_find(graph, nodeBId);
 	if (!nodeA || !nodeB) { return false; }
 
 	rg::NodeTypeCi const & typeA = impl_node_type(nodeA->type);
@@ -184,7 +216,7 @@ static bool impl_link_check(
 	if (!impl_pin_kinds_compatible(descA.kind, descB.kind)) { return false; }
 
 	// with allowReplace the caller removes the input's existing link first
-	if (!allowReplace && impl_link_find_into(g, nodeBId, pinB)) {
+	if (!allowReplace && impl_link_find_into(graph, nodeBId, pinB)) {
 		return false;
 	}
 
@@ -192,15 +224,23 @@ static bool impl_link_check(
 	bool const temporal = (
 		descB.pinIn.temporal == rg::PinResourceTemporal::previousFrame
 	);
-	if (!temporal && impl_node_reachable(g, nodeBId, nodeAId)) {
+	if (!temporal && impl_node_reachable(graph, nodeBId, nodeAId)) {
 		return false;
 	}
 
 	return true;
 }
 
-static void impl_link_destroy(ImplGraph & g, uint32_t const linkId) {
-	std::erase_if(g.state.links, [&](ImplLink const & link) {
+// -----------------------------------------------------------------------------
+// -- impl edits
+// -----------------------------------------------------------------------------
+
+static auto impl_link_destroy(
+	ImplGraph & graph,
+	uint32_t const linkId
+) -> void
+{
+	std::erase_if(graph.state.links, [&](ImplLink const & link) {
 		return link.id == linkId;
 	});
 }
@@ -209,7 +249,10 @@ static void impl_link_destroy(ImplGraph & g, uint32_t const linkId) {
 // -- node types
 // -----------------------------------------------------------------------------
 
-rg::NodeType rg::register_node_type(NodeTypeCi const & ci) {
+auto rg::register_node_type(
+	NodeTypeCi const & ci
+) -> rg::NodeType
+{
 	assert(
 		!sImplNodeTypeUniqueNameToId.contains(ci.uniqueName)
 		&& "node type registered twice"
@@ -220,7 +263,10 @@ rg::NodeType rg::register_node_type(NodeTypeCi const & ci) {
 	return { id };
 }
 
-rg::NodeType rg::node_type_find(std::string const & uniqueName) {
+auto rg::node_type_find(
+	std::string const & uniqueName
+) -> rg::NodeType
+{
 	auto const it = sImplNodeTypeUniqueNameToId.find(uniqueName);
 	return { it == sImplNodeTypeUniqueNameToId.end() ? 0u : it->second };
 }
@@ -229,38 +275,43 @@ rg::NodeType rg::node_type_find(std::string const & uniqueName) {
 // -- graph
 // -----------------------------------------------------------------------------
 
-rg::Graph rg::graph_create() {
+auto rg::graph_create() -> rg::Graph
+{
 	static uint32_t sNextGraphId = 1;
 	uint32_t const id = sNextGraphId++;
-	auto g = std::make_unique<ImplGraph>();
-	g->editor = ImNodes::EditorContextCreate();
-	sImplGraphs[id] = std::move(g);
+	auto graph = std::make_unique<ImplGraph>();
+	graph->editor = ImNodes::EditorContextCreate();
+	sImplGraphs[id] = std::move(graph);
 	return { id };
 }
 
-void rg::graph_destroy(Graph const graph) {
-	ImNodes::EditorContextFree(impl_graph(graph).editor);
-	sImplGraphs.erase(graph.id);
+auto rg::graph_destroy(
+	Graph const hGraph
+) -> void
+{
+	ImNodes::EditorContextFree(impl_graph(hGraph).editor);
+	sImplGraphs.erase(hGraph.id);
 }
 
 // -----------------------------------------------------------------------------
-// -- edits
+// -- edits: nodes
 // -----------------------------------------------------------------------------
 
-rg::NodeInstance rg::node_instance_create(
-	Graph const graph,
+auto rg::node_instance_create(
+	Graph const hGraph,
 	std::string const & uniqueName,
 	int32_t const positionX,
 	int32_t const positionY,
 	std::vector<rg::ParameterValue> const & parameterValues
-) {
-	ImplGraph & g = impl_graph(graph);
+) -> rg::NodeInstance
+{
+	ImplGraph & graph = impl_graph(hGraph);
 	NodeType const type = node_type_find(uniqueName);
 	assert(type.id != 0 && "node type not registered");
 	NodeTypeCi const & ci = impl_node_type(type);
 
 	ImplNodeInstance node = {
-		.id = g.nextNodeId++,
+		.id = graph.nextNodeId++,
 		.type = type,
 		.parameterValues = parameterValues,
 		.posX = positionX,
@@ -273,171 +324,216 @@ rg::NodeInstance rg::node_instance_create(
 	}
 	assert(node.parameterValues.size() == ci.parameters.size());
 
-	impl_edit_record(g);
-	g.state.nodes[node.id] = node;
+	impl_edit_record(graph);
+	graph.state.nodes[node.id] = node;
 	return { .id = node.id, .type = type };
 }
 
-void rg::node_instance_destroy(Graph const graph, NodeInstance const node) {
-	ImplGraph & g = impl_graph(graph);
-	if (!impl_node_find(g, node.id)) { return; }
-	impl_edit_record(g);
-	std::erase_if(g.state.links, [&](ImplLink const & link) {
-		return link.nodeA == node.id || link.nodeB == node.id;
+auto rg::node_instance_destroy(
+	Graph const hGraph,
+	NodeInstance const hNode
+) -> void
+{
+	ImplGraph & graph = impl_graph(hGraph);
+	if (!impl_node_find(graph, hNode.id)) { return; }
+	impl_edit_record(graph);
+	std::erase_if(graph.state.links, [&](ImplLink const & link) {
+		return link.nodeA == hNode.id || link.nodeB == hNode.id;
 	});
-	g.state.nodes.erase(node.id);
+	graph.state.nodes.erase(hNode.id);
 }
 
-void rg::node_instance_set_position(
-	Graph const graph,
-	NodeInstance const node,
+auto rg::node_instance_set_position(
+	Graph const hGraph,
+	NodeInstance const hNode,
 	int32_t const positionX,
 	int32_t const positionY
-) {
-	ImplGraph & g = impl_graph(graph);
-	ImplNodeInstance const * const found = impl_node_find(g, node.id);
+) -> void
+{
+	ImplGraph & graph = impl_graph(hGraph);
+	ImplNodeInstance const * const found = impl_node_find(graph, hNode.id);
 	if (!found) { return; }
 	if (found->posX == positionX && found->posY == positionY) { return; }
-	impl_edit_record(g);
-	ImplNodeInstance & n = g.state.nodes.at(node.id);
+	impl_edit_record(graph);
+	ImplNodeInstance & n = graph.state.nodes.at(hNode.id);
 	n.posX = positionX;
 	n.posY = positionY;
 }
 
-void rg::node_instance_set_name(
-	Graph const graph,
-	NodeInstance const node,
+auto rg::node_instance_set_name(
+	Graph const hGraph,
+	NodeInstance const hNode,
 	std::string const & name
-) {
-	ImplGraph & g = impl_graph(graph);
-	ImplNodeInstance const * const found = impl_node_find(g, node.id);
+) -> void
+{
+	ImplGraph & graph = impl_graph(hGraph);
+	ImplNodeInstance const * const found = impl_node_find(graph, hNode.id);
 	if (!found || found->name == name) { return; }
-	impl_edit_record(g);
-	g.state.nodes.at(node.id).name = name;
+	impl_edit_record(graph);
+	graph.state.nodes.at(hNode.id).name = name;
 }
 
-bool rg::node_instance_can_link(
-	Graph const graph,
-	NodeInstance const nodeA,
+// -----------------------------------------------------------------------------
+// -- edits: links
+// -----------------------------------------------------------------------------
+
+auto rg::node_instance_can_link(
+	Graph const hGraph,
+	NodeInstance const hNodeA,
 	uint32_t const pinA,
-	NodeInstance const nodeB,
+	NodeInstance const hNodeB,
 	uint32_t const pinB
-) {
+) -> bool
+{
 	return impl_link_check(
-		impl_graph(graph), nodeA.id, pinA, nodeB.id, pinB, false
+		impl_graph(hGraph), hNodeA.id, pinA, hNodeB.id, pinB, false
 	);
 }
 
-rg::Link rg::node_instance_link(
-	Graph const graph,
-	NodeInstance const nodeA,
+auto rg::node_instance_link(
+	Graph const hGraph,
+	NodeInstance const hNodeA,
 	uint32_t const pinA,
-	NodeInstance const nodeB,
+	NodeInstance const hNodeB,
 	uint32_t const pinB
-) {
-	ImplGraph & g = impl_graph(graph);
-	if (!impl_link_check(g, nodeA.id, pinA, nodeB.id, pinB, false)) {
+) -> rg::Link
+{
+	ImplGraph & graph = impl_graph(hGraph);
+	if (!impl_link_check(graph, hNodeA.id, pinA, hNodeB.id, pinB, false)) {
 		return { 0 };
 	}
-	impl_edit_record(g);
+	impl_edit_record(graph);
 	ImplLink const link = {
-		.id = g.nextLinkId++,
-		.nodeA = nodeA.id,
+		.id = graph.nextLinkId++,
+		.nodeA = hNodeA.id,
 		.pinA = pinA,
-		.nodeB = nodeB.id,
+		.nodeB = hNodeB.id,
 		.pinB = pinB,
 	};
-	g.state.links.push_back(link);
+	graph.state.links.push_back(link);
 	return { link.id };
 }
 
-void rg::link_destroy(Graph const graph, Link const link) {
-	ImplGraph & g = impl_graph(graph);
+auto rg::link_destroy(
+	Graph const hGraph,
+	Link const hLink
+) -> void
+{
+	ImplGraph & graph = impl_graph(hGraph);
 	bool const exists = std::any_of(
-		g.state.links.begin(), g.state.links.end(),
-		[&](ImplLink const & l) { return l.id == link.id; }
+		graph.state.links.begin(), graph.state.links.end(),
+		[&](ImplLink const & l) { return l.id == hLink.id; }
 	);
 	if (!exists) { return; }
-	impl_edit_record(g);
-	impl_link_destroy(g, link.id);
+	impl_edit_record(graph);
+	impl_link_destroy(graph, hLink.id);
 }
 
-void rg::transaction_begin(Graph const graph) {
-	ImplGraph & g = impl_graph(graph);
-	if (g.transactionDepth++ == 0) {
-		g.transactionRecorded = false;
+// -----------------------------------------------------------------------------
+// -- edits: transactions
+// -----------------------------------------------------------------------------
+
+auto rg::transaction_begin(
+	Graph const hGraph
+) -> void
+{
+	ImplGraph & graph = impl_graph(hGraph);
+	if (graph.transactionDepth++ == 0) {
+		graph.transactionRecorded = false;
 	}
 }
 
-void rg::transaction_end(Graph const graph) {
-	ImplGraph & g = impl_graph(graph);
-	assert(g.transactionDepth > 0 && "unbalanced transaction_end");
-	--g.transactionDepth;
+auto rg::transaction_end(
+	Graph const hGraph
+) -> void
+{
+	ImplGraph & graph = impl_graph(hGraph);
+	assert(graph.transactionDepth > 0 && "unbalanced transaction_end");
+	--graph.transactionDepth;
 }
 
 // -----------------------------------------------------------------------------
 // -- undo
 // -----------------------------------------------------------------------------
 
-bool rg::undo(Graph const graph) {
-	ImplGraph & g = impl_graph(graph);
-	assert(g.transactionDepth == 0 && "undo inside a transaction");
-	if (g.undoStack.empty()) { return false; }
-	g.redoStack.push_back(std::move(g.state));
-	g.state = std::move(g.undoStack.back());
-	g.undoStack.pop_back();
-	g.positionsDirty = true;
+auto rg::undo(
+	Graph const hGraph
+) -> bool
+{
+	ImplGraph & graph = impl_graph(hGraph);
+	assert(graph.transactionDepth == 0 && "undo inside a transaction");
+	if (graph.undoStack.empty()) { return false; }
+	graph.redoStack.push_back(std::move(graph.state));
+	graph.state = std::move(graph.undoStack.back());
+	graph.undoStack.pop_back();
+	graph.positionsDirty = true;
 	return true;
 }
 
-bool rg::redo(Graph const graph) {
-	ImplGraph & g = impl_graph(graph);
-	assert(g.transactionDepth == 0 && "redo inside a transaction");
-	if (g.redoStack.empty()) { return false; }
-	g.undoStack.push_back(std::move(g.state));
-	g.state = std::move(g.redoStack.back());
-	g.redoStack.pop_back();
-	g.positionsDirty = true;
+auto rg::redo(
+	Graph const hGraph
+) -> bool
+{
+	ImplGraph & graph = impl_graph(hGraph);
+	assert(graph.transactionDepth == 0 && "redo inside a transaction");
+	if (graph.redoStack.empty()) { return false; }
+	graph.undoStack.push_back(std::move(graph.state));
+	graph.state = std::move(graph.redoStack.back());
+	graph.redoStack.pop_back();
+	graph.positionsDirty = true;
 	return true;
 }
 
-void rg::undo_history_clear(Graph const graph) {
-	ImplGraph & g = impl_graph(graph);
-	g.undoStack.clear();
-	g.redoStack.clear();
+auto rg::undo_history_clear(
+	Graph const hGraph
+) -> void
+{
+	ImplGraph & graph = impl_graph(hGraph);
+	graph.undoStack.clear();
+	graph.redoStack.clear();
 }
 
 // -----------------------------------------------------------------------------
 // -- load/save
 // -----------------------------------------------------------------------------
 
-void rg::load_from_file(Graph const graph, std::string const & path) {
+auto rg::load_from_file(
+	Graph const hGraph,
+	std::string const & path
+) -> void
+{
 }
 
-
 // -----------------------------------------------------------------------------
-// -- ui impl detail
+// -- ui impl: pin ids
 // -----------------------------------------------------------------------------
 
 // imnodes needs a unique int per pin; derive it from the model rather than
 // storing one, so pins need no identity of their own
-static int impl_ui_pin_id(
+static auto impl_ui_pin_id(
 	uint32_t const nodeId,
 	rg::PinDir const dir,
 	uint32_t const index
-) {
+) -> int
+{
 	assert(nodeId < (1u << 15) && index < (1u << 15));
 	uint32_t const dirBit = dir == rg::PinDir::out ? 1u : 0u;
 	return static_cast<int>((nodeId << 16) | (dirBit << 15) | index);
 }
 
-struct ImplUiPin {
-	uint32_t nodeId;
-	rg::PinDir dir;
-	uint32_t index;
-};
+namespace
+{
+	struct ImplUiPin {
+		uint32_t nodeId;
+		rg::PinDir dir;
+		uint32_t index;
+	};
+}
 
-static ImplUiPin impl_ui_pin_decode(int const pinId) {
+static auto impl_ui_pin_decode(
+	int const pinId
+) -> ImplUiPin
+{
 	uint32_t const v = static_cast<uint32_t>(pinId);
 	return {
 		.nodeId = v >> 16,
@@ -446,7 +542,14 @@ static ImplUiPin impl_ui_pin_decode(int const pinId) {
 	};
 }
 
-static char const * impl_ui_node_name(ImplNodeInstance const & node) {
+// -----------------------------------------------------------------------------
+// -- ui impl: labels
+// -----------------------------------------------------------------------------
+
+static auto impl_ui_node_name(
+	ImplNodeInstance const & node
+) -> char const *
+{
 	return (
 		node.name.empty()
 		? impl_node_type(node.type).name.c_str()
@@ -454,7 +557,10 @@ static char const * impl_ui_node_name(ImplNodeInstance const & node) {
 	);
 }
 
-static char const * impl_to_string(rg::PinKind const v) {
+static auto impl_to_string(
+	rg::PinKind const v
+) -> char const *
+{
 	switch (v) {
 		case rg::PinKind::image: return "image";
 		case rg::PinKind::buffer: return "buffer";
@@ -463,7 +569,10 @@ static char const * impl_to_string(rg::PinKind const v) {
 	return "?";
 }
 
-static char const * impl_to_string(rg::ImageFormat const v) {
+static auto impl_to_string(
+	rg::ImageFormat const v
+) -> char const *
+{
 	switch (v) {
 		case rg::ImageFormat::r8: return "r8";
 		case rg::ImageFormat::r16: return "r16";
@@ -481,7 +590,10 @@ static char const * impl_to_string(rg::ImageFormat const v) {
 	return "?";
 }
 
-static char const * impl_to_string(rg::AccessMode const v) {
+static auto impl_to_string(
+	rg::AccessMode const v
+) -> char const *
+{
 	switch (v) {
 		case rg::AccessMode::Sampled: return "sampled";
 		case rg::AccessMode::StorageRead: return "storage read";
@@ -497,7 +609,10 @@ static char const * impl_to_string(rg::AccessMode const v) {
 	return "?";
 }
 
-static char const * impl_to_string(rg::NodeTypeQueue const v) {
+static auto impl_to_string(
+	rg::NodeTypeQueue const v
+) -> char const *
+{
 	switch (v) {
 		case rg::NodeTypeQueue::graphics: return "graphics";
 		case rg::NodeTypeQueue::compute: return "compute";
@@ -506,10 +621,11 @@ static char const * impl_to_string(rg::NodeTypeQueue const v) {
 	return "?";
 }
 
-static void impl_ui_parameter_value_text(
+static auto impl_ui_parameter_value_text(
 	rg::ParameterDesc const & desc,
 	rg::ParameterValue const & value
-) {
+) -> void
+{
 	switch (desc.kind) {
 		case rg::ParameterKind::f32:
 			ImGui::Text(
@@ -545,12 +661,20 @@ static void impl_ui_parameter_value_text(
 	}
 }
 
-static void impl_ui_draw_node(ImplGraph const & g, ImplNodeInstance const & node) {
+// -----------------------------------------------------------------------------
+// -- ui impl: node drawing
+// -----------------------------------------------------------------------------
+
+static auto impl_ui_draw_node(
+	ImplGraph const & graph,
+	ImplNodeInstance const & node
+) -> void
+{
 	rg::NodeTypeCi const & nodeType = impl_node_type(node.type);
 	int const nodeId = static_cast<int>(node.id);
 	ImNodes::BeginNode(nodeId);
 
-	if (g.positionsDirty) {
+	if (graph.positionsDirty) {
 		ImNodes::SetNodeGridSpacePos(
 			nodeId,
 			ImVec2(static_cast<float>(node.posX), static_cast<float>(node.posY))
@@ -580,14 +704,17 @@ static void impl_ui_draw_node(ImplGraph const & g, ImplNodeInstance const & node
 	ImNodes::EndNode();
 }
 
-static void impl_ui_draw_rendergraph(ImplGraph const & g) {
+static auto impl_ui_draw_rendergraph(
+	ImplGraph const & graph
+) -> void
+{
 	// -- render nodes
-	for (auto const & [id, node] : g.state.nodes) {
-		impl_ui_draw_node(g, node);
+	for (auto const & [id, node] : graph.state.nodes) {
+		impl_ui_draw_node(graph, node);
 	}
 
 	// -- render links
-	for (ImplLink const & link : g.state.links) {
+	for (ImplLink const & link : graph.state.links) {
 		ImNodes::Link(
 			static_cast<int>(link.id),
 			impl_ui_pin_id(link.nodeA, rg::PinDir::out, link.pinA),
@@ -596,35 +723,46 @@ static void impl_ui_draw_rendergraph(ImplGraph const & g) {
 	}
 }
 
-static void impl_ui_open_properties(ImplGraph & g, uint32_t const nodeId) {
-	ImplNodeInstance const * const node = impl_node_find(g, nodeId);
+// -----------------------------------------------------------------------------
+// -- ui impl: properties popup
+// -----------------------------------------------------------------------------
+
+static auto impl_ui_open_properties(
+	ImplGraph & graph,
+	uint32_t const nodeId
+) -> void
+{
+	ImplNodeInstance const * const node = impl_node_find(graph, nodeId);
 	if (!node) { return; }
-	g.ui.propertiesNode = nodeId;
-	snprintf(g.ui.nameBuffer, sizeof(g.ui.nameBuffer), "%s", node->name.c_str());
+	graph.ui.propertiesNode = nodeId;
+	snprintf(graph.ui.nameBuffer, sizeof(graph.ui.nameBuffer), "%s", node->name.c_str());
 	ImGui::OpenPopup("rg_node_properties");
 }
 
-static void impl_ui_draw_properties(rg::Graph const graph) {
-	ImplGraph & g = impl_graph(graph);
+static auto impl_ui_draw_properties(
+	rg::Graph const hGraph
+) -> void
+{
+	ImplGraph & graph = impl_graph(hGraph);
 	if (!ImGui::BeginPopup("rg_node_properties")) { return; }
 
 	// the node can vanish under the popup, eg via undo
-	ImplNodeInstance const * const node = impl_node_find(g, g.ui.propertiesNode);
+	ImplNodeInstance const * const node = impl_node_find(graph, graph.ui.propertiesNode);
 	if (!node) {
 		ImGui::CloseCurrentPopup();
 		ImGui::EndPopup();
 		return;
 	}
 	rg::NodeTypeCi const & nodeType = impl_node_type(node->type);
-	rg::NodeInstance const handle = { .id = node->id, .type = node->type };
+	rg::NodeInstance const hNode = { .id = node->id, .type = node->type };
 
 	// -- name; committed once editing finishes so a rename is one undo step
 	ImGui::SetNextItemWidth(240.0f);
 	ImGui::InputTextWithHint(
-		"name", nodeType.name.c_str(), g.ui.nameBuffer, sizeof(g.ui.nameBuffer)
+		"name", nodeType.name.c_str(), graph.ui.nameBuffer, sizeof(graph.ui.nameBuffer)
 	);
 	if (ImGui::IsItemDeactivatedAfterEdit()) {
-		rg::node_instance_set_name(graph, handle, g.ui.nameBuffer);
+		rg::node_instance_set_name(hGraph, hNode, graph.ui.nameBuffer);
 	}
 
 	ImGui::Text("type   %s (%s)", nodeType.name.c_str(), nodeType.uniqueName.c_str());
@@ -660,8 +798,8 @@ static void impl_ui_draw_properties(rg::Graph const graph) {
 				ImGui::TableNextColumn();
 				ImGui::Text("%gx%g, %u mips", pin.scaleWidth, pin.scaleHeight, pin.mipLevels);
 				ImGui::TableNextColumn();
-				if (ImplLink const * link = impl_link_find_into(g, node->id, i)) {
-					ImplNodeInstance const & from = g.state.nodes.at(link->nodeA);
+				if (ImplLink const * link = impl_link_find_into(graph, node->id, i)) {
+					ImplNodeInstance const & from = graph.state.nodes.at(link->nodeA);
 					ImGui::Text(
 						"%s.%s",
 						impl_ui_node_name(from),
@@ -688,7 +826,7 @@ static void impl_ui_draw_properties(rg::Graph const graph) {
 			for (uint32_t i = 0; i < nodeType.pinOut.size(); ++i) {
 				rg::PinDesc const & pin = nodeType.pinOut[i];
 				auto const numLinks = std::count_if(
-					g.state.links.begin(), g.state.links.end(),
+					graph.state.links.begin(), graph.state.links.end(),
 					[&](ImplLink const & l) {
 						return l.nodeA == node->id && l.pinA == i;
 					}
@@ -726,9 +864,16 @@ static void impl_ui_draw_properties(rg::Graph const graph) {
 	ImGui::EndPopup();
 }
 
+// -----------------------------------------------------------------------------
+// -- ui impl: input
+// -----------------------------------------------------------------------------
+
 // All interaction queries; imnodes only answers these after EndNodeEditor.
-static void impl_ui_handle_input(rg::Graph const graph) {
-	ImplGraph & g = impl_graph(graph);
+static auto impl_ui_handle_input(
+	rg::Graph const hGraph
+) -> void
+{
+	ImplGraph & graph = impl_graph(hGraph);
 	ImGuiIO const & io = ImGui::GetIO();
 
 	// -- created links; dropping onto a linked input replaces its link
@@ -741,17 +886,17 @@ static void impl_ui_handle_input(rg::Graph const graph) {
 			if (a.dir == rg::PinDir::in) { std::swap(a, b); }
 			bool const valid = (
 				a.dir == rg::PinDir::out && b.dir == rg::PinDir::in
-				&& impl_link_check(g, a.nodeId, a.index, b.nodeId, b.index, true)
+				&& impl_link_check(graph, a.nodeId, a.index, b.nodeId, b.index, true)
 			);
 			if (valid) {
-				rg::transaction_begin(graph);
-				if (ImplLink const * old = impl_link_find_into(g, b.nodeId, b.index)) {
-					rg::link_destroy(graph, { old->id });
+				rg::transaction_begin(hGraph);
+				if (ImplLink const * old = impl_link_find_into(graph, b.nodeId, b.index)) {
+					rg::link_destroy(hGraph, { old->id });
 				}
 				rg::node_instance_link(
-					graph, { a.nodeId }, a.index, { b.nodeId }, b.index
+					hGraph, { a.nodeId }, a.index, { b.nodeId }, b.index
 				);
-				rg::transaction_end(graph);
+				rg::transaction_end(hGraph);
 			}
 		}
 	}
@@ -765,32 +910,32 @@ static void impl_ui_handle_input(rg::Graph const graph) {
 			bool const onNode = (
 				ImNodes::IsNodeHovered(&nodeId) && !ImNodes::IsPinHovered(&pinId)
 			);
-			g.ui.pressNode = onNode && !modifier ? static_cast<uint32_t>(nodeId) : 0;
+			graph.ui.pressNode = onNode && !modifier ? static_cast<uint32_t>(nodeId) : 0;
 		}
-		if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && g.ui.pressNode) {
+		if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && graph.ui.pressNode) {
 			float const threshold = io.MouseDragThreshold;
 			if (io.MouseDragMaxDistanceSqr[0] < threshold * threshold) {
-				impl_ui_open_properties(g, g.ui.pressNode);
+				impl_ui_open_properties(graph, graph.ui.pressNode);
 			}
-			g.ui.pressNode = 0;
+			graph.ui.pressNode = 0;
 		}
 	}
 
 	// -- node moves; recorded once the drag ends
 	if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-		rg::transaction_begin(graph);
-		for (auto const & [id, node] : g.state.nodes) {
+		rg::transaction_begin(hGraph);
+		for (auto const & [id, node] : graph.state.nodes) {
 			ImVec2 const pos = ImNodes::GetNodeGridSpacePos(static_cast<int>(id));
 			rg::node_instance_set_position(
-				graph,
+				hGraph,
 				{ id },
 				static_cast<int32_t>(std::lround(pos.x)),
 				static_cast<int32_t>(std::lround(pos.y))
 			);
 		}
-		rg::transaction_end(graph);
+		rg::transaction_end(hGraph);
 		// setting positions only mirrors imnodes; nothing to push back
-		g.positionsDirty = false;
+		graph.positionsDirty = false;
 	}
 
 	// -- delete selection
@@ -805,14 +950,14 @@ static void impl_ui_handle_input(rg::Graph const graph) {
 		if (numLinks > 0) { ImNodes::GetSelectedLinks(links.data()); }
 		if (numNodes > 0) { ImNodes::GetSelectedNodes(nodes.data()); }
 
-		rg::transaction_begin(graph);
+		rg::transaction_begin(hGraph);
 		for (int const id : links) {
-			rg::link_destroy(graph, { static_cast<uint32_t>(id) });
+			rg::link_destroy(hGraph, { static_cast<uint32_t>(id) });
 		}
 		for (int const id : nodes) {
-			rg::node_instance_destroy(graph, { static_cast<uint32_t>(id) });
+			rg::node_instance_destroy(hGraph, { static_cast<uint32_t>(id) });
 		}
-		rg::transaction_end(graph);
+		rg::transaction_end(hGraph);
 		ImNodes::ClearLinkSelection();
 		ImNodes::ClearNodeSelection();
 	}
@@ -821,13 +966,13 @@ static void impl_ui_handle_input(rg::Graph const graph) {
 	{
 		bool changed = false;
 		if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Z)) {
-			changed = rg::undo(graph);
+			changed = rg::undo(hGraph);
 		}
 		if (
 			ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z)
 			|| ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Y)
 		) {
-			changed = rg::redo(graph);
+			changed = rg::redo(hGraph);
 		}
 		if (changed) {
 			ImNodes::ClearLinkSelection();
@@ -860,10 +1005,10 @@ static void impl_ui_handle_input(rg::Graph const graph) {
 		int linkId = 0;
 		int nodeId = 0;
 		if (ImNodes::IsLinkHovered(&linkId)) {
-			g.ui.contextLink = static_cast<uint32_t>(linkId);
+			graph.ui.contextLink = static_cast<uint32_t>(linkId);
 			ImGui::OpenPopup("rg_link_menu");
 		} else if (ImNodes::IsNodeHovered(&nodeId)) {
-			g.ui.contextNode = static_cast<uint32_t>(nodeId);
+			graph.ui.contextNode = static_cast<uint32_t>(nodeId);
 			ImGui::OpenPopup("rg_node_menu");
 		} else if (ImNodes::IsEditorHovered()) {
 			ImGui::OpenPopup("rg_context_menu");
@@ -872,7 +1017,7 @@ static void impl_ui_handle_input(rg::Graph const graph) {
 
 	if (ImGui::BeginPopup("rg_link_menu")) {
 		if (ImGui::MenuItem("delete link")) {
-			rg::link_destroy(graph, { g.ui.contextLink });
+			rg::link_destroy(hGraph, { graph.ui.contextLink });
 			ImNodes::ClearLinkSelection();
 		}
 		ImGui::EndPopup();
@@ -884,14 +1029,14 @@ static void impl_ui_handle_input(rg::Graph const graph) {
 			openProperties = true;
 		}
 		if (ImGui::MenuItem("delete node")) {
-			rg::node_instance_destroy(graph, { g.ui.contextNode });
+			rg::node_instance_destroy(hGraph, { graph.ui.contextNode });
 			ImNodes::ClearNodeSelection();
 		}
 		ImGui::EndPopup();
 	}
 	// opened outside the menu so it isn't a child of the closing popup
 	if (openProperties) {
-		impl_ui_open_properties(g, g.ui.contextNode);
+		impl_ui_open_properties(graph, graph.ui.contextNode);
 	}
 
 	if (ImGui::BeginPopup("rg_context_menu")) {
@@ -902,49 +1047,52 @@ static void impl_ui_handle_input(rg::Graph const graph) {
 				}
 				// let imnodes convert the click position to grid space, then
 				// store it; one undo step for create + place
-				rg::transaction_begin(graph);
-				rg::NodeInstance const node = (
-					rg::node_instance_create(graph, nodeType.uniqueName)
+				rg::transaction_begin(hGraph);
+				rg::NodeInstance const hNode = (
+					rg::node_instance_create(hGraph, nodeType.uniqueName)
 				);
-				int const nodeId = static_cast<int>(node.id);
+				int const nodeId = static_cast<int>(hNode.id);
 				ImNodes::SetNodeScreenSpacePos(
 					nodeId, ImGui::GetMousePosOnOpeningCurrentPopup()
 				);
 				ImVec2 const pos = ImNodes::GetNodeGridSpacePos(nodeId);
 				rg::node_instance_set_position(
-					graph,
-					node,
+					hGraph,
+					hNode,
 					static_cast<int32_t>(std::lround(pos.x)),
 					static_cast<int32_t>(std::lround(pos.y))
 				);
-				rg::transaction_end(graph);
+				rg::transaction_end(hGraph);
 			}
 			ImGui::EndMenu();
 		}
 		ImGui::EndPopup();
 	}
 
-	impl_ui_draw_properties(graph);
+	impl_ui_draw_properties(hGraph);
 }
 
 // -----------------------------------------------------------------------------
 // -- ui public
 // -----------------------------------------------------------------------------
 
-void rg::ui_draw(Graph const graph) {
-	ImplGraph & g = impl_graph(graph);
+auto rg::ui_draw(
+	Graph const hGraph
+) -> void
+{
+	ImplGraph & graph = impl_graph(hGraph);
 
 	ImGui::Begin("Render Graph");
-	ImNodes::EditorContextSet(g.editor);
+	ImNodes::EditorContextSet(graph.editor);
 	ImNodes::BeginNodeEditor();
+	impl_ui_draw_rendergraph(graph);
+	graph.positionsDirty = false;
 
-	// -- minimap
+	// -- minimap; imnodes needs it after all nodes and links
 	ImNodes::MiniMap(0.2f, ImNodesMiniMapLocation_BottomRight);
 
-	impl_ui_draw_rendergraph(g);
-	g.positionsDirty = false;
 	ImNodes::EndNodeEditor();
 
-	impl_ui_handle_input(graph);
+	impl_ui_handle_input(hGraph);
 	ImGui::End();
 }

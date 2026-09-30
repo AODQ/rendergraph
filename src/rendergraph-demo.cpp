@@ -8,7 +8,7 @@
 // -- implementation helpers
 // -----------------------------------------------------------------------------
 
-static rg::PinDesc impl_pin_in(
+static auto impl_pin_in(
 	char const * const name,
 	rg::PinKind const kind,
 	rg::ImageFormat const format = rg::ImageFormat::rgba16,
@@ -19,7 +19,7 @@ static rg::PinDesc impl_pin_in(
 	f32 const scaleWidth = 1.0f,
 	f32 const scaleHeight = 1.0f,
 	u32 const mipLevels = 1
-)
+) -> rg::PinDesc
 {
 	return rg::PinDesc{
 		.name = name,
@@ -38,7 +38,7 @@ static rg::PinDesc impl_pin_in(
 	};
 }
 
-static rg::PinDesc impl_pin_out(
+static auto impl_pin_out(
 	char const * const name,
 	rg::PinKind const kind,
 	rg::ImageFormat const format = rg::ImageFormat::rgba16,
@@ -46,7 +46,7 @@ static rg::PinDesc impl_pin_out(
 	f32 const scaleWidth = 1.0f,
 	f32 const scaleHeight = 1.0f,
 	u32 const mipLevels = 1
-)
+) -> rg::PinDesc
 {
 	return rg::PinDesc{
 		.name = name,
@@ -63,12 +63,12 @@ static rg::PinDesc impl_pin_out(
 	};
 }
 
-static rg::ParameterDesc impl_param_f32(
+static auto impl_param_f32(
 	char const * const name,
 	f32 const defaultValue,
 	f32 const minValue,
 	f32 const maxValue
-)
+) -> rg::ParameterDesc
 {
 	return rg::ParameterDesc{
 		.name = name,
@@ -92,12 +92,12 @@ static rg::ParameterDesc impl_param_f32(
 	};
 }
 
-static rg::ParameterDesc impl_param_u32(
+static auto impl_param_u32(
 	char const * const name,
 	u32 const defaultValue,
 	u32 const minValue,
 	u32 const maxValue
-)
+) -> rg::ParameterDesc
 {
 	return rg::ParameterDesc{
 		.name = name,
@@ -121,10 +121,10 @@ static rg::ParameterDesc impl_param_u32(
 	};
 }
 
-static rg::ParameterDesc impl_param_bool(
+static auto impl_param_bool(
 	char const * const name,
 	bool const defaultValue
-)
+) -> rg::ParameterDesc
 {
 	return rg::ParameterDesc{
 		.name = name,
@@ -148,11 +148,11 @@ static rg::ParameterDesc impl_param_bool(
 	};
 }
 
-static rg::ParameterDesc impl_param_enum(
+static auto impl_param_enum(
 	char const * const name,
 	u32 const defaultIndex,
 	std::initializer_list<char const *> const values
-)
+) -> rg::ParameterDesc
 {
 	std::vector<std::string> enumValues;
 
@@ -177,7 +177,7 @@ static rg::ParameterDesc impl_param_enum(
 // -- node type registration
 // -----------------------------------------------------------------------------
 
-static void impl_register_demo_node_types()
+static auto impl_register_demo_node_types() -> void
 {
 	// -------------------------------------------------------------------------
 	// Scene / geometry
@@ -1180,7 +1180,9 @@ static void impl_register_demo_node_types()
 // -- demo graph
 // -----------------------------------------------------------------------------
 
-void rg::demo_graph(rg::Graph const graph)
+auto rg::demo_graph(
+	rg::Graph const hGraph
+) -> void
 {
 	// node types are process-wide, so only register them once
 	if (rg::node_type_find("engine.scene_upload").id == 0) {
@@ -1189,7 +1191,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance sceneUpload = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.scene_upload",
 			-1200,
 			0,
@@ -1199,7 +1201,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance culling = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.gpu_culling",
 			-1000,
 			0,
@@ -1209,7 +1211,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance depth = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.depth_prepass",
 			-800,
 			-300,
@@ -1219,7 +1221,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance hiz = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.hiz_build",
 			-600,
 			-300,
@@ -1229,7 +1231,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance shadowCulling = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.shadow_culling",
 			-800,
 			350,
@@ -1239,7 +1241,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance shadowMaps = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.shadow_maps",
 			-600,
 			350,
@@ -1249,7 +1251,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance gbuffer = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.gbuffer",
 			-600,
 			0,
@@ -1259,7 +1261,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance decals = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.decals",
 			-350,
 			0,
@@ -1269,7 +1271,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance ssao = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.ssao",
 			-350,
 			-400,
@@ -1290,7 +1292,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance clusterBuild = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.cluster_build",
 			-350,
 			-150,
@@ -1300,7 +1302,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance ssr = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.ssr",
 			-100,
 			-400,
@@ -1321,7 +1323,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance opaqueLighting = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.opaque_lighting",
 			-100,
 			0,
@@ -1331,7 +1333,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance volumetricFog = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.volumetric_fog",
 			150,
 			-250,
@@ -1347,7 +1349,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance particleSimulation = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.particle_simulation",
 			-100,
 			350,
@@ -1357,7 +1359,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance particleRender = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.particle_render",
 			150,
 			350,
@@ -1367,7 +1369,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance transparency = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.transparency",
 			400,
 			0,
@@ -1377,7 +1379,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance histogram = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.luminance_histogram",
 			600,
 			-350,
@@ -1387,7 +1389,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance exposure = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.auto_exposure",
 			800,
 			-350,
@@ -1403,7 +1405,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance bloomExtract = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.bloom_extract",
 			600,
 			50,
@@ -1419,7 +1421,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance bloomDownsample0 = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.bloom_downsample",
 			800,
 			50,
@@ -1429,7 +1431,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance bloomDownsample1 = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.bloom_downsample",
 			1000,
 			50,
@@ -1439,7 +1441,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance bloomDownsample2 = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.bloom_downsample",
 			1200,
 			50,
@@ -1449,7 +1451,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance bloomUpsample0 = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.bloom_upsample",
 			1400,
 			50,
@@ -1465,7 +1467,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance bloomUpsample1 = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.bloom_upsample",
 			1600,
 			50,
@@ -1481,7 +1483,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance bloomUpsample2 = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.bloom_upsample",
 			1800,
 			50,
@@ -1497,7 +1499,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance taau = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.taau",
 			800,
 			300,
@@ -1518,7 +1520,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance bloomComposite = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.bloom_composite",
 			2000,
 			50,
@@ -1534,7 +1536,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance colorGrade = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.color_grade",
 			2200,
 			50,
@@ -1544,7 +1546,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance toneMap = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.tonemap",
 			2400,
 			50,
@@ -1565,7 +1567,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance uiComposite = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.ui_composite",
 			2600,
 			50,
@@ -1575,7 +1577,7 @@ void rg::demo_graph(rg::Graph const graph)
 
 	[[maybe_unused]] const rg::NodeInstance present = (
 		rg::node_instance_create(
-			graph,
+			hGraph,
 			"engine.present",
 			2800,
 			50,
@@ -1584,60 +1586,60 @@ void rg::demo_graph(rg::Graph const graph)
 	);
 
 	// -- links
-	rg::node_instance_link(graph, sceneUpload, 0, culling, 0);
+	rg::node_instance_link(hGraph, sceneUpload, 0, culling, 0);
 
-	rg::node_instance_link(graph, culling, 0, depth, 0);
-	rg::node_instance_link(graph, culling, 0, shadowCulling, 0);
-	rg::node_instance_link(graph, culling, 0, gbuffer, 0);
-	rg::node_instance_link(graph, culling, 0, clusterBuild, 0);
-	rg::node_instance_link(graph, culling, 0, particleSimulation, 1);
+	rg::node_instance_link(hGraph, culling, 0, depth, 0);
+	rg::node_instance_link(hGraph, culling, 0, shadowCulling, 0);
+	rg::node_instance_link(hGraph, culling, 0, gbuffer, 0);
+	rg::node_instance_link(hGraph, culling, 0, clusterBuild, 0);
+	rg::node_instance_link(hGraph, culling, 0, particleSimulation, 1);
 
-	rg::node_instance_link(graph, depth, 0, hiz, 0);
-	rg::node_instance_link(graph, depth, 0, ssao, 0);
+	rg::node_instance_link(hGraph, depth, 0, hiz, 0);
+	rg::node_instance_link(hGraph, depth, 0, ssao, 0);
 
-	rg::node_instance_link(graph, shadowCulling, 0, shadowMaps, 0);
+	rg::node_instance_link(hGraph, shadowCulling, 0, shadowMaps, 0);
 
-	rg::node_instance_link(graph, gbuffer, 0, decals, 1);
-	rg::node_instance_link(graph, gbuffer, 1, decals, 2);
-	rg::node_instance_link(graph, gbuffer, 2, decals, 3);
-	rg::node_instance_link(graph, gbuffer, 3, taau, 1);
-	rg::node_instance_link(graph, gbuffer, 4, decals, 0);
-	rg::node_instance_link(graph, gbuffer, 4, ssao, 0);
-	rg::node_instance_link(graph, gbuffer, 4, opaqueLighting, 3);
-	rg::node_instance_link(graph, gbuffer, 4, particleRender, 1);
-	rg::node_instance_link(graph, gbuffer, 4, taau, 2);
+	rg::node_instance_link(hGraph, gbuffer, 0, decals, 1);
+	rg::node_instance_link(hGraph, gbuffer, 1, decals, 2);
+	rg::node_instance_link(hGraph, gbuffer, 2, decals, 3);
+	rg::node_instance_link(hGraph, gbuffer, 3, taau, 1);
+	rg::node_instance_link(hGraph, gbuffer, 4, decals, 0);
+	rg::node_instance_link(hGraph, gbuffer, 4, ssao, 0);
+	rg::node_instance_link(hGraph, gbuffer, 4, opaqueLighting, 3);
+	rg::node_instance_link(hGraph, gbuffer, 4, particleRender, 1);
+	rg::node_instance_link(hGraph, gbuffer, 4, taau, 2);
 
-	rg::node_instance_link(graph, decals, 0, opaqueLighting, 0);
-	rg::node_instance_link(graph, decals, 1, opaqueLighting, 1);
-	rg::node_instance_link(graph, decals, 2, opaqueLighting, 2);
+	rg::node_instance_link(hGraph, decals, 0, opaqueLighting, 0);
+	rg::node_instance_link(hGraph, decals, 1, opaqueLighting, 1);
+	rg::node_instance_link(hGraph, decals, 2, opaqueLighting, 2);
 
-	rg::node_instance_link(graph, hiz, 0, clusterBuild, 1);
-	rg::node_instance_link(graph, hiz, 0, ssr, 3);
+	rg::node_instance_link(hGraph, hiz, 0, clusterBuild, 1);
+	rg::node_instance_link(hGraph, hiz, 0, ssr, 3);
 
-	rg::node_instance_link(graph, ssao, 0, opaqueLighting, 4);
+	rg::node_instance_link(hGraph, ssao, 0, opaqueLighting, 4);
 
-	rg::node_instance_link(graph, shadowMaps, 0, opaqueLighting, 6);
+	rg::node_instance_link(hGraph, shadowMaps, 0, opaqueLighting, 6);
 
-	rg::node_instance_link(graph, clusterBuild, 0, opaqueLighting, 7);
+	rg::node_instance_link(hGraph, clusterBuild, 0, opaqueLighting, 7);
 
-	rg::node_instance_link(graph, opaqueLighting, 0, volumetricFog, 0);
-	rg::node_instance_link(graph, opaqueLighting, 0, ssr, 0);
-	rg::node_instance_link(graph, opaqueLighting, 0, histogram, 0);
-	rg::node_instance_link(graph, opaqueLighting, 0, bloomExtract, 0);
-	rg::node_instance_link(graph, opaqueLighting, 0, transparency, 0);
+	rg::node_instance_link(hGraph, opaqueLighting, 0, volumetricFog, 0);
+	rg::node_instance_link(hGraph, opaqueLighting, 0, ssr, 0);
+	rg::node_instance_link(hGraph, opaqueLighting, 0, histogram, 0);
+	rg::node_instance_link(hGraph, opaqueLighting, 0, bloomExtract, 0);
+	rg::node_instance_link(hGraph, opaqueLighting, 0, transparency, 0);
 
-	rg::node_instance_link(graph, particleSimulation, 0, particleRender, 0);
+	rg::node_instance_link(hGraph, particleSimulation, 0, particleRender, 0);
 
-	rg::node_instance_link(graph, volumetricFog, 0, transparency, 0);
+	rg::node_instance_link(hGraph, volumetricFog, 0, transparency, 0);
 
-	rg::node_instance_link(graph, histogram, 0, exposure, 0);
+	rg::node_instance_link(hGraph, histogram, 0, exposure, 0);
 
-	rg::node_instance_link(graph, bloomExtract, 0, bloomDownsample0, 0);
-	rg::node_instance_link(graph, bloomDownsample0, 0, bloomDownsample1, 0);
-	rg::node_instance_link(graph, bloomDownsample1, 0, bloomDownsample2, 0);
+	rg::node_instance_link(hGraph, bloomExtract, 0, bloomDownsample0, 0);
+	rg::node_instance_link(hGraph, bloomDownsample0, 0, bloomDownsample1, 0);
+	rg::node_instance_link(hGraph, bloomDownsample1, 0, bloomDownsample2, 0);
 
 	rg::node_instance_link(
-		graph,
+		hGraph,
 		bloomDownsample2,
 		0,
 		bloomUpsample0,
@@ -1645,7 +1647,7 @@ void rg::demo_graph(rg::Graph const graph)
 	);
 
 	rg::node_instance_link(
-		graph,
+		hGraph,
 		bloomDownsample1,
 		0,
 		bloomUpsample0,
@@ -1653,7 +1655,7 @@ void rg::demo_graph(rg::Graph const graph)
 	);
 
 	rg::node_instance_link(
-		graph,
+		hGraph,
 		bloomUpsample0,
 		0,
 		bloomUpsample1,
@@ -1661,7 +1663,7 @@ void rg::demo_graph(rg::Graph const graph)
 	);
 
 	rg::node_instance_link(
-		graph,
+		hGraph,
 		bloomDownsample0,
 		0,
 		bloomUpsample1,
@@ -1669,7 +1671,7 @@ void rg::demo_graph(rg::Graph const graph)
 	);
 
 	rg::node_instance_link(
-		graph,
+		hGraph,
 		bloomUpsample1,
 		0,
 		bloomUpsample2,
@@ -1677,26 +1679,26 @@ void rg::demo_graph(rg::Graph const graph)
 	);
 
 	rg::node_instance_link(
-		graph,
+		hGraph,
 		bloomExtract,
 		0,
 		bloomUpsample2,
 		1
 	);
 
-	rg::node_instance_link(graph, transparency, 0, taau, 0);
+	rg::node_instance_link(hGraph, transparency, 0, taau, 0);
 
-	rg::node_instance_link(graph, taau, 0, bloomComposite, 0);
+	rg::node_instance_link(hGraph, taau, 0, bloomComposite, 0);
 
-	rg::node_instance_link(graph, bloomUpsample2, 0, bloomComposite, 1);
+	rg::node_instance_link(hGraph, bloomUpsample2, 0, bloomComposite, 1);
 
-	rg::node_instance_link(graph, bloomComposite, 0, colorGrade, 0);
+	rg::node_instance_link(hGraph, bloomComposite, 0, colorGrade, 0);
 
-	rg::node_instance_link(graph, colorGrade, 0, toneMap, 0);
+	rg::node_instance_link(hGraph, colorGrade, 0, toneMap, 0);
 
-	rg::node_instance_link(graph, exposure, 0, toneMap, 1);
+	rg::node_instance_link(hGraph, exposure, 0, toneMap, 1);
 
-	rg::node_instance_link(graph, toneMap, 0, uiComposite, 0);
+	rg::node_instance_link(hGraph, toneMap, 0, uiComposite, 0);
 
-	rg::node_instance_link(graph, uiComposite, 0, present, 0);
+	rg::node_instance_link(hGraph, uiComposite, 0, present, 0);
 }

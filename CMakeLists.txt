@@ -39,8 +39,8 @@ target_include_directories(
 )
 target_link_libraries(imgui PUBLIC glfw)
 
-add_library(imnodes STATIC third_party/imnodes/imnodes.cpp)
-target_include_directories(imnodes PUBLIC third_party/imnodes)
+add_library(imnodes STATIC third-party/imnodes/imnodes.cpp)
+target_include_directories(imnodes PUBLIC third-party/imnodes)
 target_link_libraries(imnodes PUBLIC imgui)
 
 add_executable(
