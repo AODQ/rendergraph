@@ -4,64 +4,11 @@
 
 #include <initializer_list>
 
+#include "log.hpp"
+
 // -----------------------------------------------------------------------------
 // -- implementation helpers
 // -----------------------------------------------------------------------------
-
-static auto impl_pin_in(
-	char const * const name,
-	rg::PinKind const kind,
-	rg::ImageFormat const format = rg::ImageFormat::rgba16,
-	rg::AccessMode const accessMode = rg::AccessMode::Sampled,
-	bool const required = true,
-	rg::PinResourceTemporal const temporal =
-		rg::PinResourceTemporal::currentFrame,
-	f32 const scaleWidth = 1.0f,
-	f32 const scaleHeight = 1.0f,
-	u32 const mipLevels = 1
-) -> rg::PinDesc
-{
-	return rg::PinDesc{
-		.name = name,
-		.kind = kind,
-		.dir = rg::PinDir::in,
-		.pinIn = {
-			.required = required,
-			.temporal = temporal,
-			.format = format,
-			.accessMode = accessMode,
-		},
-		.pinOut = {},
-		.scaleWidth = scaleWidth,
-		.scaleHeight = scaleHeight,
-		.mipLevels = mipLevels,
-	};
-}
-
-static auto impl_pin_out(
-	char const * const name,
-	rg::PinKind const kind,
-	rg::ImageFormat const format = rg::ImageFormat::rgba16,
-	rg::AccessMode const accessMode = rg::AccessMode::StorageWrite,
-	f32 const scaleWidth = 1.0f,
-	f32 const scaleHeight = 1.0f,
-	u32 const mipLevels = 1
-) -> rg::PinDesc
-{
-	return rg::PinDesc{
-		.name = name,
-		.kind = kind,
-		.dir = rg::PinDir::out,
-		.pinIn = {},
-		.pinOut = {
-			.format = format,
-			.accessMode = accessMode,
-		},
-		.scaleWidth = scaleWidth,
-		.scaleHeight = scaleHeight,
-		.mipLevels = mipLevels,
-	};
-}
 
 static auto impl_param_f32(
 	char const * const name,
@@ -180,6 +127,33 @@ static auto impl_param_enum(
 static auto impl_register_demo_node_types() -> void
 {
 	// -------------------------------------------------------------------------
+	// Global layout
+	// -------------------------------------------------------------------------
+
+	rg::register_global_layout(
+		rg::GlobalLayoutCi{
+			.fields = std::vector<rg::GlobalFieldDesc>{
+				rg::GlobalFieldDesc{
+					.name = "renderCamera",
+					.bufferType = "Camera",
+				},
+				rg::GlobalFieldDesc{
+					.name = "scene",
+					.bufferType = "MeshClusterList",
+				},
+				rg::GlobalFieldDesc{
+					.name = "lightClusters",
+					.bufferType = "LightClusterList",
+				},
+				rg::GlobalFieldDesc{
+					.name = "exposure",
+					.bufferType = "Exposure",
+				},
+			},
+		}
+	);
+
+	// -------------------------------------------------------------------------
 	// Scene / geometry
 	// -------------------------------------------------------------------------
 
@@ -190,12 +164,36 @@ static auto impl_register_demo_node_types() -> void
 			.queue = rg::NodeTypeQueue::copy,
 			.pinIn = std::vector<rg::PinDesc>{},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"Scene",
-					rg::PinKind::buffer,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::CopyDst
-				),
+				rg::PinDesc{
+					.name = "Scene",
+					.kind = rg::PinKind::buffer,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.accessMode = rg::AccessMode::CopyDst,
+					},
+					.bufferType = "MeshClusterList",
+				},
+			},
+			.parameters = std::vector<rg::ParameterDesc>{},
+		}
+	);
+
+	rg::register_node_type(
+		rg::NodeTypeCi{
+			.name = "Camera",
+			.uniqueName = "engine.camera",
+			.queue = rg::NodeTypeQueue::compute,
+			.pinIn = std::vector<rg::PinDesc>{},
+			.pinOut = std::vector<rg::PinDesc>{
+				rg::PinDesc{
+					.name = "Camera",
+					.kind = rg::PinKind::buffer,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.accessMode = rg::AccessMode::StorageWrite,
+					},
+					.bufferType = "Camera",
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{},
 		}
@@ -206,21 +204,17 @@ static auto impl_register_demo_node_types() -> void
 			.name = "GPU Culling",
 			.uniqueName = "engine.gpu_culling",
 			.queue = rg::NodeTypeQueue::compute,
-			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"Scene",
-					rg::PinKind::buffer,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageRead
-				),
-			},
+			.pinIn = std::vector<rg::PinDesc>{},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"Visible Instances",
-					rg::PinKind::buffer,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageWrite
-				),
+				rg::PinDesc{
+					.name = "Visible Instances",
+					.kind = rg::PinKind::buffer,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.accessMode = rg::AccessMode::StorageWrite,
+					},
+					.bufferType = "MeshClusterList",
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{},
 		}
@@ -232,20 +226,26 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.depth_prepass",
 			.queue = rg::NodeTypeQueue::graphics,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"Visible Instances",
-					rg::PinKind::buffer,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::IndirectBuffer
-				),
+				rg::PinDesc{
+					.name = "Visible Instances",
+					.kind = rg::PinKind::buffer,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::IndirectBuffer,
+					},
+					.bufferType = "MeshClusterList",
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"Depth",
-					rg::PinKind::image,
-					rg::ImageFormat::r32f,
-					rg::AccessMode::DepthWrite
-				),
+				rg::PinDesc{
+					.name = "Depth",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.format = rg::ImageFormat::r32f,
+						.accessMode = rg::AccessMode::DepthWrite,
+					},
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{},
 		}
@@ -257,23 +257,27 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.hiz_build",
 			.queue = rg::NodeTypeQueue::compute,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"Depth",
-					rg::PinKind::image,
-					rg::ImageFormat::r32f,
-					rg::AccessMode::Sampled
-				),
+				rg::PinDesc{
+					.name = "Depth",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::r32f,
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"Hi-Z",
-					rg::PinKind::image,
-					rg::ImageFormat::r32f,
-					rg::AccessMode::StorageWrite,
-					1.0f,
-					1.0f,
-					8
-				),
+				rg::PinDesc{
+					.name = "Hi-Z",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.format = rg::ImageFormat::r32f,
+						.accessMode = rg::AccessMode::StorageWrite,
+					},
+					.mipLevels = 8,
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{},
 		}
@@ -285,49 +289,30 @@ static auto impl_register_demo_node_types() -> void
 
 	rg::register_node_type(
 		rg::NodeTypeCi{
-			.name = "Shadow Culling",
-			.uniqueName = "engine.shadow_culling",
-			.queue = rg::NodeTypeQueue::compute,
-			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"Scene",
-					rg::PinKind::buffer,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageRead
-				),
-			},
-			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"Shadow Instances",
-					rg::PinKind::buffer,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageWrite
-				),
-			},
-			.parameters = std::vector<rg::ParameterDesc>{},
-		}
-	);
-
-	rg::register_node_type(
-		rg::NodeTypeCi{
 			.name = "Shadow Maps",
 			.uniqueName = "engine.shadow_maps",
 			.queue = rg::NodeTypeQueue::graphics,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"Shadow Instances",
-					rg::PinKind::buffer,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::IndirectBuffer
-				),
+				rg::PinDesc{
+					.name = "Shadow Instances",
+					.kind = rg::PinKind::buffer,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::IndirectBuffer,
+					},
+					.bufferType = "MeshClusterList",
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"Shadow Atlas",
-					rg::PinKind::image,
-					rg::ImageFormat::r32f,
-					rg::AccessMode::DepthWrite
-				),
+				rg::PinDesc{
+					.name = "Shadow Atlas",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.format = rg::ImageFormat::r32f,
+						.accessMode = rg::AccessMode::DepthWrite,
+					},
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{},
 		}
@@ -343,44 +328,61 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.gbuffer",
 			.queue = rg::NodeTypeQueue::graphics,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"Visible Instances",
-					rg::PinKind::buffer,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::IndirectBuffer
-				),
+				rg::PinDesc{
+					.name = "Visible Instances",
+					.kind = rg::PinKind::buffer,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::IndirectBuffer,
+					},
+					.bufferType = "MeshClusterList",
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"Albedo",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba8,
-					rg::AccessMode::ColorAttachment
-				),
-				impl_pin_out(
-					"Normal",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::ColorAttachment
-				),
-				impl_pin_out(
-					"Material",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba8,
-					rg::AccessMode::ColorAttachment
-				),
-				impl_pin_out(
-					"Motion",
-					rg::PinKind::image,
-					rg::ImageFormat::rg16,
-					rg::AccessMode::ColorAttachment
-				),
-				impl_pin_out(
-					"Depth",
-					rg::PinKind::image,
-					rg::ImageFormat::r32f,
-					rg::AccessMode::DepthWrite
-				),
+				rg::PinDesc{
+					.name = "Albedo",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.format = rg::ImageFormat::rgba8,
+						.accessMode = rg::AccessMode::ColorAttachment,
+					},
+				},
+				rg::PinDesc{
+					.name = "Normal",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.accessMode = rg::AccessMode::ColorAttachment,
+					},
+				},
+				rg::PinDesc{
+					.name = "Material",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.format = rg::ImageFormat::rgba8,
+						.accessMode = rg::AccessMode::ColorAttachment,
+					},
+				},
+				rg::PinDesc{
+					.name = "Motion",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.format = rg::ImageFormat::rg16,
+						.accessMode = rg::AccessMode::ColorAttachment,
+					},
+				},
+				rg::PinDesc{
+					.name = "Depth",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.format = rg::ImageFormat::r32f,
+						.accessMode = rg::AccessMode::DepthWrite,
+					},
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{},
 		}
@@ -392,50 +394,69 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.decals",
 			.queue = rg::NodeTypeQueue::graphics,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"Depth",
-					rg::PinKind::image,
-					rg::ImageFormat::r32f,
-					rg::AccessMode::DepthRead
-				),
-				impl_pin_in(
-					"Albedo",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba8,
-					rg::AccessMode::ColorAttachment
-				),
-				impl_pin_in(
-					"Normal",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::ColorAttachment
-				),
-				impl_pin_in(
-					"Material",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba8,
-					rg::AccessMode::ColorAttachment
-				),
+				rg::PinDesc{
+					.name = "Depth",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::r32f,
+						.accessMode = rg::AccessMode::DepthRead,
+					},
+				},
+				rg::PinDesc{
+					.name = "Albedo",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::rgba8,
+						.accessMode = rg::AccessMode::ColorAttachment,
+					},
+				},
+				rg::PinDesc{
+					.name = "Normal",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::ColorAttachment,
+					},
+				},
+				rg::PinDesc{
+					.name = "Material",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::rgba8,
+						.accessMode = rg::AccessMode::ColorAttachment,
+					},
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"Albedo",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba8,
-					rg::AccessMode::ColorAttachment
-				),
-				impl_pin_out(
-					"Normal",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::ColorAttachment
-				),
-				impl_pin_out(
-					"Material",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba8,
-					rg::AccessMode::ColorAttachment
-				),
+				rg::PinDesc{
+					.name = "Albedo",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.format = rg::ImageFormat::rgba8,
+						.accessMode = rg::AccessMode::ColorAttachment,
+					},
+				},
+				rg::PinDesc{
+					.name = "Normal",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.accessMode = rg::AccessMode::ColorAttachment,
+					},
+				},
+				rg::PinDesc{
+					.name = "Material",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.format = rg::ImageFormat::rgba8,
+						.accessMode = rg::AccessMode::ColorAttachment,
+					},
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{},
 		}
@@ -451,26 +472,26 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.cluster_build",
 			.queue = rg::NodeTypeQueue::compute,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"Scene",
-					rg::PinKind::buffer,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageRead
-				),
-				impl_pin_in(
-					"Hi-Z",
-					rg::PinKind::image,
-					rg::ImageFormat::r32f,
-					rg::AccessMode::Sampled
-				),
+				rg::PinDesc{
+					.name = "Hi-Z",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::r32f,
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"Light Clusters",
-					rg::PinKind::buffer,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageWrite
-				),
+				rg::PinDesc{
+					.name = "Light Clusters",
+					.kind = rg::PinKind::buffer,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.accessMode = rg::AccessMode::StorageWrite,
+					},
+					.bufferType = "LightClusterList",
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{},
 		}
@@ -482,26 +503,34 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.ssao",
 			.queue = rg::NodeTypeQueue::compute,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"Depth",
-					rg::PinKind::image,
-					rg::ImageFormat::r32f,
-					rg::AccessMode::Sampled
-				),
-				impl_pin_in(
-					"Normal",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::Sampled
-				),
+				rg::PinDesc{
+					.name = "Depth",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::r32f,
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
+				rg::PinDesc{
+					.name = "Normal",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"AO",
-					rg::PinKind::image,
-					rg::ImageFormat::r8,
-					rg::AccessMode::StorageWrite
-				),
+				rg::PinDesc{
+					.name = "AO",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.format = rg::ImageFormat::r8,
+						.accessMode = rg::AccessMode::StorageWrite,
+					},
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{
 				impl_param_f32("Radius", 1.0f, 0.0f, 10.0f),
@@ -516,38 +545,50 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.ssr",
 			.queue = rg::NodeTypeQueue::compute,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"HDR",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::Sampled
-				),
-				impl_pin_in(
-					"Depth",
-					rg::PinKind::image,
-					rg::ImageFormat::r32f,
-					rg::AccessMode::Sampled
-				),
-				impl_pin_in(
-					"Normal",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::Sampled
-				),
-				impl_pin_in(
-					"Hi-Z",
-					rg::PinKind::image,
-					rg::ImageFormat::r32f,
-					rg::AccessMode::Sampled
-				),
+				rg::PinDesc{
+					.name = "HDR",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
+				rg::PinDesc{
+					.name = "Depth",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::r32f,
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
+				rg::PinDesc{
+					.name = "Normal",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
+				rg::PinDesc{
+					.name = "Hi-Z",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::r32f,
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"Reflections",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageWrite
-				),
+				rg::PinDesc{
+					.name = "Reflections",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.accessMode = rg::AccessMode::StorageWrite,
+					},
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{
 				impl_param_f32(
@@ -572,63 +613,78 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.opaque_lighting",
 			.queue = rg::NodeTypeQueue::graphics,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"Albedo",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba8,
-					rg::AccessMode::Sampled
-				),
-				impl_pin_in(
-					"Normal",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::Sampled
-				),
-				impl_pin_in(
-					"Material",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba8,
-					rg::AccessMode::Sampled
-				),
-				impl_pin_in(
-					"Depth",
-					rg::PinKind::image,
-					rg::ImageFormat::r32f,
-					rg::AccessMode::DepthRead
-				),
-				impl_pin_in(
-					"AO",
-					rg::PinKind::image,
-					rg::ImageFormat::r8,
-					rg::AccessMode::Sampled
-				),
-				impl_pin_in(
-					"Reflections",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::Sampled,
-					false
-				),
-				impl_pin_in(
-					"Shadow Atlas",
-					rg::PinKind::image,
-					rg::ImageFormat::r32f,
-					rg::AccessMode::Sampled
-				),
-				impl_pin_in(
-					"Light Clusters",
-					rg::PinKind::buffer,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageRead
-				),
+				rg::PinDesc{
+					.name = "Albedo",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::rgba8,
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
+				rg::PinDesc{
+					.name = "Normal",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
+				rg::PinDesc{
+					.name = "Material",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::rgba8,
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
+				rg::PinDesc{
+					.name = "Depth",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::r32f,
+						.accessMode = rg::AccessMode::DepthRead,
+					},
+				},
+				rg::PinDesc{
+					.name = "AO",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::r8,
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
+				rg::PinDesc{
+					.name = "Reflections",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.required = false,
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
+				rg::PinDesc{
+					.name = "Shadow Atlas",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::r32f,
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"HDR",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::ColorAttachment
-				),
+				rg::PinDesc{
+					.name = "HDR",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.accessMode = rg::AccessMode::ColorAttachment,
+					},
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{},
 		}
@@ -644,32 +700,42 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.volumetric_fog",
 			.queue = rg::NodeTypeQueue::compute,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"HDR",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageRead
-				),
-				impl_pin_in(
-					"Depth",
-					rg::PinKind::image,
-					rg::ImageFormat::r32f,
-					rg::AccessMode::Sampled
-				),
-				impl_pin_in(
-					"Shadow Atlas",
-					rg::PinKind::image,
-					rg::ImageFormat::r32f,
-					rg::AccessMode::Sampled
-				),
+				rg::PinDesc{
+					.name = "HDR",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::StorageRead,
+					},
+				},
+				rg::PinDesc{
+					.name = "Depth",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::r32f,
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
+				rg::PinDesc{
+					.name = "Shadow Atlas",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::r32f,
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"HDR",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageWrite
-				),
+				rg::PinDesc{
+					.name = "HDR",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.accessMode = rg::AccessMode::StorageWrite,
+					},
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{
 				impl_param_f32(
@@ -688,26 +754,26 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.particle_simulation",
 			.queue = rg::NodeTypeQueue::compute,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"Particles",
-					rg::PinKind::buffer,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageRead
-				),
-				impl_pin_in(
-					"Scene",
-					rg::PinKind::buffer,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageRead
-				),
+				rg::PinDesc{
+					.name = "Particles",
+					.kind = rg::PinKind::buffer,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::StorageRead,
+					},
+					.bufferType = "ParticleList",
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"Particles",
-					rg::PinKind::buffer,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageWrite
-				),
+				rg::PinDesc{
+					.name = "Particles",
+					.kind = rg::PinKind::buffer,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.accessMode = rg::AccessMode::StorageWrite,
+					},
+					.bufferType = "ParticleList",
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{},
 		}
@@ -719,26 +785,34 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.particle_render",
 			.queue = rg::NodeTypeQueue::graphics,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"Particles",
-					rg::PinKind::buffer,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::IndirectBuffer
-				),
-				impl_pin_in(
-					"Depth",
-					rg::PinKind::image,
-					rg::ImageFormat::r32f,
-					rg::AccessMode::DepthRead
-				),
+				rg::PinDesc{
+					.name = "Particles",
+					.kind = rg::PinKind::buffer,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::IndirectBuffer,
+					},
+					.bufferType = "ParticleList",
+				},
+				rg::PinDesc{
+					.name = "Depth",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::r32f,
+						.accessMode = rg::AccessMode::DepthRead,
+					},
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"HDR",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::ColorAttachment
-				),
+				rg::PinDesc{
+					.name = "HDR",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.accessMode = rg::AccessMode::ColorAttachment,
+					},
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{},
 		}
@@ -750,26 +824,33 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.transparency",
 			.queue = rg::NodeTypeQueue::graphics,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"HDR",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::ColorAttachment
-				),
-				impl_pin_in(
-					"Depth",
-					rg::PinKind::image,
-					rg::ImageFormat::r32f,
-					rg::AccessMode::DepthRead
-				),
+				rg::PinDesc{
+					.name = "HDR",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::ColorAttachment,
+					},
+				},
+				rg::PinDesc{
+					.name = "Depth",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::r32f,
+						.accessMode = rg::AccessMode::DepthRead,
+					},
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"HDR",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::ColorAttachment
-				),
+				rg::PinDesc{
+					.name = "HDR",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.accessMode = rg::AccessMode::ColorAttachment,
+					},
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{},
 		}
@@ -785,20 +866,25 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.luminance_histogram",
 			.queue = rg::NodeTypeQueue::compute,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"HDR",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::Sampled
-				),
+				rg::PinDesc{
+					.name = "HDR",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"Histogram",
-					rg::PinKind::buffer,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageWrite
-				),
+				rg::PinDesc{
+					.name = "Histogram",
+					.kind = rg::PinKind::buffer,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.accessMode = rg::AccessMode::StorageWrite,
+					},
+					.bufferType = "Histogram",
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{},
 		}
@@ -810,28 +896,36 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.auto_exposure",
 			.queue = rg::NodeTypeQueue::compute,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"Histogram",
-					rg::PinKind::buffer,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageRead
-				),
-				impl_pin_in(
-					"Previous Exposure",
-					rg::PinKind::buffer,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageRead,
-					true,
-					rg::PinResourceTemporal::previousFrame
-				),
+				rg::PinDesc{
+					.name = "Histogram",
+					.kind = rg::PinKind::buffer,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::StorageRead,
+					},
+					.bufferType = "Histogram",
+				},
+				rg::PinDesc{
+					.name = "Previous Exposure",
+					.kind = rg::PinKind::buffer,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.temporal = rg::PinResourceTemporal::previousFrame,
+						.accessMode = rg::AccessMode::StorageRead,
+					},
+					.bufferType = "Exposure",
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"Exposure",
-					rg::PinKind::buffer,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageWrite
-				),
+				rg::PinDesc{
+					.name = "Exposure",
+					.kind = rg::PinKind::buffer,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.accessMode = rg::AccessMode::StorageWrite,
+					},
+					.bufferType = "Exposure",
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{
 				impl_param_f32(
@@ -854,20 +948,24 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.bloom_extract",
 			.queue = rg::NodeTypeQueue::compute,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"HDR",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::Sampled
-				),
+				rg::PinDesc{
+					.name = "HDR",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"Bloom",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageWrite
-				),
+				rg::PinDesc{
+					.name = "Bloom",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.accessMode = rg::AccessMode::StorageWrite,
+					},
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{
 				impl_param_f32(
@@ -886,22 +984,26 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.bloom_downsample",
 			.queue = rg::NodeTypeQueue::compute,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"Input",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::Sampled
-				),
+				rg::PinDesc{
+					.name = "Input",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"Output",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageWrite,
-					0.5f,
-					0.5f
-				),
+				rg::PinDesc{
+					.name = "Output",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.accessMode = rg::AccessMode::StorageWrite,
+					},
+					.scaleWidth = 0.5f,
+					.scaleHeight = 0.5f,
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{},
 		}
@@ -913,26 +1015,32 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.bloom_upsample",
 			.queue = rg::NodeTypeQueue::compute,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"Low",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::Sampled
-				),
-				impl_pin_in(
-					"High",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageRead
-				),
+				rg::PinDesc{
+					.name = "Low",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
+				rg::PinDesc{
+					.name = "High",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::StorageRead,
+					},
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"Output",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageWrite
-				),
+				rg::PinDesc{
+					.name = "Output",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.accessMode = rg::AccessMode::StorageWrite,
+					},
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{
 				impl_param_f32(
@@ -955,40 +1063,51 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.taau",
 			.queue = rg::NodeTypeQueue::compute,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"HDR",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::Sampled
-				),
-				impl_pin_in(
-					"Motion",
-					rg::PinKind::image,
-					rg::ImageFormat::rg16,
-					rg::AccessMode::Sampled
-				),
-				impl_pin_in(
-					"Depth",
-					rg::PinKind::image,
-					rg::ImageFormat::r32f,
-					rg::AccessMode::Sampled
-				),
-				impl_pin_in(
-					"History",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::Sampled,
-					true,
-					rg::PinResourceTemporal::previousFrame
-				),
+				rg::PinDesc{
+					.name = "HDR",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
+				rg::PinDesc{
+					.name = "Motion",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::rg16,
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
+				rg::PinDesc{
+					.name = "Depth",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::r32f,
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
+				rg::PinDesc{
+					.name = "History",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.temporal = rg::PinResourceTemporal::previousFrame,
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"Output",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageWrite
-				),
+				rg::PinDesc{
+					.name = "Output",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.accessMode = rg::AccessMode::StorageWrite,
+					},
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{
 				impl_param_f32(
@@ -1017,26 +1136,32 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.bloom_composite",
 			.queue = rg::NodeTypeQueue::compute,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"HDR",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageRead
-				),
-				impl_pin_in(
-					"Bloom",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::Sampled
-				),
+				rg::PinDesc{
+					.name = "HDR",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::StorageRead,
+					},
+				},
+				rg::PinDesc{
+					.name = "Bloom",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"HDR",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageWrite
-				),
+				rg::PinDesc{
+					.name = "HDR",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.accessMode = rg::AccessMode::StorageWrite,
+					},
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{
 				impl_param_f32(
@@ -1055,20 +1180,24 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.color_grade",
 			.queue = rg::NodeTypeQueue::compute,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"HDR",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageRead
-				),
+				rg::PinDesc{
+					.name = "HDR",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::StorageRead,
+					},
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"HDR",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::StorageWrite
-				),
+				rg::PinDesc{
+					.name = "HDR",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.accessMode = rg::AccessMode::StorageWrite,
+					},
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{},
 		}
@@ -1080,26 +1209,25 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.tonemap",
 			.queue = rg::NodeTypeQueue::graphics,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"HDR",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::Sampled
-				),
-				impl_pin_in(
-					"Exposure",
-					rg::PinKind::buffer,
-					rg::ImageFormat::rgba16,
-					rg::AccessMode::UniformBuffer
-				),
+				rg::PinDesc{
+					.name = "HDR",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.accessMode = rg::AccessMode::Sampled,
+					},
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"LDR",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba8,
-					rg::AccessMode::ColorAttachment
-				),
+				rg::PinDesc{
+					.name = "LDR",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.format = rg::ImageFormat::rgba8,
+						.accessMode = rg::AccessMode::ColorAttachment,
+					},
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{
 				impl_param_enum(
@@ -1128,20 +1256,26 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.ui_composite",
 			.queue = rg::NodeTypeQueue::graphics,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"Color",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba8,
-					rg::AccessMode::ColorAttachment
-				),
+				rg::PinDesc{
+					.name = "Color",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::rgba8,
+						.accessMode = rg::AccessMode::ColorAttachment,
+					},
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{
-				impl_pin_out(
-					"Color",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba8,
-					rg::AccessMode::ColorAttachment
-				),
+				rg::PinDesc{
+					.name = "Color",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::out,
+					.pinOut = {
+						.format = rg::ImageFormat::rgba8,
+						.accessMode = rg::AccessMode::ColorAttachment,
+					},
+				},
 			},
 			.parameters = std::vector<rg::ParameterDesc>{},
 		}
@@ -1157,18 +1291,24 @@ static auto impl_register_demo_node_types() -> void
 			.uniqueName = "engine.present",
 			.queue = rg::NodeTypeQueue::graphics,
 			.pinIn = std::vector<rg::PinDesc>{
-				impl_pin_in(
-					"Color",
-					rg::PinKind::image,
-					rg::ImageFormat::rgba8,
-					rg::AccessMode::CopySrc
-				),
-				impl_pin_in(
-					"Swapchain",
-					rg::PinKind::externalImage,
-					rg::ImageFormat::rgba8,
-					rg::AccessMode::CopyDst
-				),
+				rg::PinDesc{
+					.name = "Color",
+					.kind = rg::PinKind::image,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::rgba8,
+						.accessMode = rg::AccessMode::CopySrc,
+					},
+				},
+				rg::PinDesc{
+					.name = "Swapchain",
+					.kind = rg::PinKind::externalImage,
+					.dir = rg::PinDir::in,
+					.pinIn = {
+						.format = rg::ImageFormat::rgba8,
+						.accessMode = rg::AccessMode::CopyDst,
+					},
+				},
 			},
 			.pinOut = std::vector<rg::PinDesc>{},
 			.parameters = std::vector<rg::ParameterDesc>{},
@@ -1177,42 +1317,180 @@ static auto impl_register_demo_node_types() -> void
 }
 
 // -----------------------------------------------------------------------------
+// -- demo graph checks
+// -----------------------------------------------------------------------------
+
+// stores the line of the first edit that failed to add
+template <typename Handle>
+static auto impl_demo_check(
+	int32_t & failedLine,
+	int32_t const line,
+	Handle const handle
+) -> Handle
+{
+	if (handle.id == 0 && failedLine == 0) {
+		failedLine = line;
+	}
+	return handle;
+}
+
+// These macros store failures in the local failedLine.
+#define DEMO_GROUP_CREATE(...) impl_demo_check( \
+	failedLine, __LINE__, rg::graph_group_create(__VA_ARGS__) \
+)
+#define DEMO_NODE_CREATE(...) impl_demo_check( \
+	failedLine, __LINE__, rg::node_instance_create(__VA_ARGS__) \
+)
+#define DEMO_LINK(...) impl_demo_check( \
+	failedLine, __LINE__, rg::node_instance_link(__VA_ARGS__) \
+)
+#define DEMO_GROUP_LINK(...) impl_demo_check( \
+	failedLine, __LINE__, rg::group_field_link(__VA_ARGS__) \
+)
+
+// -----------------------------------------------------------------------------
 // -- demo graph
 // -----------------------------------------------------------------------------
+
+// indices into the demo's global layout
+constexpr uint32_t kDemoFieldRenderCamera = 0;
+constexpr uint32_t kDemoFieldScene = 1;
+constexpr uint32_t kDemoFieldLightClusters = 2;
+constexpr uint32_t kDemoFieldExposure = 3;
 
 auto rg::demo_graph(
 	rg::Graph const hGraph
 ) -> void
 {
+	int32_t failedLine = 0;
+
 	// node types are process-wide, so only register them once
 	if (rg::node_type_find("engine.scene_upload").id == 0) {
 		impl_register_demo_node_types();
 	}
 
-	[[maybe_unused]] const rg::NodeInstance sceneUpload = (
-		rg::node_instance_create(
+	// -- groups
+	auto const mainGroup = DEMO_GROUP_CREATE(
+		hGraph,
+		"Main Camera",
+		rg::graph_group_default(),
+		-1110, -450,
+		2210, 1210
+	);
+	auto const shadowGroup = DEMO_GROUP_CREATE(
+		hGraph,
+		"Shadow",
+		rg::graph_group_default(),
+		-970, 300,
+		620, 200
+	);
+	auto const lightingGroup = DEMO_GROUP_CREATE(
+		hGraph,
+		"Lighting",
+		rg::graph_group_default(),
+		-100, -40,
+		400, 420
+	);
+	auto const postGroup = DEMO_GROUP_CREATE(
+		hGraph,
+		"Post",
+		rg::graph_group_default(),
+		2850, 0,
+		620, 200
+	);
+	auto const uiGroup = DEMO_GROUP_CREATE(
+		hGraph,
+		"UI Camera",
+		rg::graph_group_default(),
+		3550, 0,
+		400, 200
+	);
+
+	// -- global layout
+	rg::graph_group_set_field_enabled(
+		hGraph, mainGroup, kDemoFieldRenderCamera, true
+	);
+	rg::graph_group_set_field_enabled(
+		hGraph, uiGroup, kDemoFieldRenderCamera, true
+	);
+	rg::graph_group_set_field_enabled(
+		hGraph, shadowGroup, kDemoFieldRenderCamera, true
+	);
+	rg::graph_group_set_field_enabled(
+		hGraph, shadowGroup, kDemoFieldScene, true
+	);
+	rg::graph_group_set_field_enabled(
+		hGraph, lightingGroup, kDemoFieldLightClusters, true
+	);
+	rg::graph_group_set_field_enabled(
+		hGraph, postGroup, kDemoFieldExposure, true
+	);
+
+	// -- nodes
+	[[maybe_unused]] const rg::NodeInstance mainCamera = (
+		DEMO_NODE_CREATE(
 			hGraph,
-			"engine.scene_upload",
-			-1200,
-			0,
+			"engine.camera",
+			rg::graph_group_default(),
+			-1450,
+			-300,
 			std::vector<rg::ParameterValue>{}
 		)
 	);
+	rg::node_instance_set_name(hGraph, mainCamera, "Main Camera");
+
+	[[maybe_unused]] const rg::NodeInstance lightCamera = (
+		DEMO_NODE_CREATE(
+			hGraph,
+			"engine.camera",
+			rg::graph_group_default(),
+			-1450,
+			300,
+			std::vector<rg::ParameterValue>{}
+		)
+	);
+	rg::node_instance_set_name(hGraph, lightCamera, "Light Camera");
+
+	[[maybe_unused]] const rg::NodeInstance uiCamera = (
+		DEMO_NODE_CREATE(
+			hGraph,
+			"engine.camera",
+			rg::graph_group_default(),
+			3300,
+			300,
+			std::vector<rg::ParameterValue>{}
+		)
+	);
+	rg::node_instance_set_name(hGraph, uiCamera, "UI Camera");
+
+	[[maybe_unused]] const rg::NodeInstance shadowProxy = (
+		DEMO_NODE_CREATE(
+			hGraph,
+			"engine.scene_upload",
+			rg::graph_group_default(),
+			-1450,
+			420,
+			std::vector<rg::ParameterValue>{}
+		)
+	);
+	rg::node_instance_set_name(hGraph, shadowProxy, "Shadow Proxy");
 
 	[[maybe_unused]] const rg::NodeInstance culling = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.gpu_culling",
-			-1000,
+			rg::graph_group_default(),
+			-960,
 			0,
 			std::vector<rg::ParameterValue>{}
 		)
 	);
 
 	[[maybe_unused]] const rg::NodeInstance depth = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.depth_prepass",
+			rg::graph_group_default(),
 			-800,
 			-300,
 			std::vector<rg::ParameterValue>{}
@@ -1220,9 +1498,10 @@ auto rg::demo_graph(
 	);
 
 	[[maybe_unused]] const rg::NodeInstance hiz = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.hiz_build",
+			rg::graph_group_default(),
 			-600,
 			-300,
 			std::vector<rg::ParameterValue>{}
@@ -1230,9 +1509,10 @@ auto rg::demo_graph(
 	);
 
 	[[maybe_unused]] const rg::NodeInstance shadowCulling = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
-			"engine.shadow_culling",
+			"engine.gpu_culling",
+			shadowGroup,
 			-800,
 			350,
 			std::vector<rg::ParameterValue>{}
@@ -1240,9 +1520,10 @@ auto rg::demo_graph(
 	);
 
 	[[maybe_unused]] const rg::NodeInstance shadowMaps = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.shadow_maps",
+			shadowGroup,
 			-600,
 			350,
 			std::vector<rg::ParameterValue>{}
@@ -1250,9 +1531,10 @@ auto rg::demo_graph(
 	);
 
 	[[maybe_unused]] const rg::NodeInstance gbuffer = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.gbuffer",
+			rg::graph_group_default(),
 			-600,
 			0,
 			std::vector<rg::ParameterValue>{}
@@ -1260,9 +1542,10 @@ auto rg::demo_graph(
 	);
 
 	[[maybe_unused]] const rg::NodeInstance decals = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.decals",
+			rg::graph_group_default(),
 			-350,
 			0,
 			std::vector<rg::ParameterValue>{}
@@ -1270,9 +1553,10 @@ auto rg::demo_graph(
 	);
 
 	[[maybe_unused]] const rg::NodeInstance ssao = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.ssao",
+			rg::graph_group_default(),
 			-350,
 			-400,
 			std::vector<rg::ParameterValue>{
@@ -1291,9 +1575,10 @@ auto rg::demo_graph(
 	);
 
 	[[maybe_unused]] const rg::NodeInstance clusterBuild = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.cluster_build",
+			rg::graph_group_default(),
 			-350,
 			-150,
 			std::vector<rg::ParameterValue>{}
@@ -1301,9 +1586,10 @@ auto rg::demo_graph(
 	);
 
 	[[maybe_unused]] const rg::NodeInstance ssr = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.ssr",
+			rg::graph_group_default(),
 			-100,
 			-400,
 			std::vector<rg::ParameterValue>{
@@ -1322,19 +1608,21 @@ auto rg::demo_graph(
 	);
 
 	[[maybe_unused]] const rg::NodeInstance opaqueLighting = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.opaque_lighting",
-			-100,
-			0,
+			lightingGroup,
+			40,
+			20,
 			std::vector<rg::ParameterValue>{}
 		)
 	);
 
 	[[maybe_unused]] const rg::NodeInstance volumetricFog = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.volumetric_fog",
+			rg::graph_group_default(),
 			150,
 			-250,
 			std::vector<rg::ParameterValue>{
@@ -1348,29 +1636,32 @@ auto rg::demo_graph(
 	);
 
 	[[maybe_unused]] const rg::NodeInstance particleSimulation = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.particle_simulation",
+			rg::graph_group_default(),
 			-100,
-			350,
+			560,
 			std::vector<rg::ParameterValue>{}
 		)
 	);
 
 	[[maybe_unused]] const rg::NodeInstance particleRender = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.particle_render",
+			rg::graph_group_default(),
 			150,
-			350,
+			560,
 			std::vector<rg::ParameterValue>{}
 		)
 	);
 
 	[[maybe_unused]] const rg::NodeInstance transparency = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.transparency",
+			rg::graph_group_default(),
 			400,
 			0,
 			std::vector<rg::ParameterValue>{}
@@ -1378,20 +1669,22 @@ auto rg::demo_graph(
 	);
 
 	[[maybe_unused]] const rg::NodeInstance histogram = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.luminance_histogram",
-			600,
+			rg::graph_group_default(),
+			1200,
 			-350,
 			std::vector<rg::ParameterValue>{}
 		)
 	);
 
 	[[maybe_unused]] const rg::NodeInstance exposure = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.auto_exposure",
-			800,
+			rg::graph_group_default(),
+			1400,
 			-350,
 			std::vector<rg::ParameterValue>{
 				rg::ParameterValue{
@@ -1404,10 +1697,11 @@ auto rg::demo_graph(
 	);
 
 	[[maybe_unused]] const rg::NodeInstance bloomExtract = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.bloom_extract",
-			600,
+			rg::graph_group_default(),
+			1200,
 			50,
 			std::vector<rg::ParameterValue>{
 				rg::ParameterValue{
@@ -1420,40 +1714,44 @@ auto rg::demo_graph(
 	);
 
 	[[maybe_unused]] const rg::NodeInstance bloomDownsample0 = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.bloom_downsample",
-			800,
+			rg::graph_group_default(),
+			1400,
 			50,
 			std::vector<rg::ParameterValue>{}
 		)
 	);
 
 	[[maybe_unused]] const rg::NodeInstance bloomDownsample1 = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.bloom_downsample",
-			1000,
+			rg::graph_group_default(),
+			1600,
 			50,
 			std::vector<rg::ParameterValue>{}
 		)
 	);
 
 	[[maybe_unused]] const rg::NodeInstance bloomDownsample2 = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.bloom_downsample",
-			1200,
+			rg::graph_group_default(),
+			1800,
 			50,
 			std::vector<rg::ParameterValue>{}
 		)
 	);
 
 	[[maybe_unused]] const rg::NodeInstance bloomUpsample0 = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.bloom_upsample",
-			1400,
+			rg::graph_group_default(),
+			2000,
 			50,
 			std::vector<rg::ParameterValue>{
 				rg::ParameterValue{
@@ -1466,10 +1764,11 @@ auto rg::demo_graph(
 	);
 
 	[[maybe_unused]] const rg::NodeInstance bloomUpsample1 = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.bloom_upsample",
-			1600,
+			rg::graph_group_default(),
+			2200,
 			50,
 			std::vector<rg::ParameterValue>{
 				rg::ParameterValue{
@@ -1482,10 +1781,11 @@ auto rg::demo_graph(
 	);
 
 	[[maybe_unused]] const rg::NodeInstance bloomUpsample2 = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.bloom_upsample",
-			1800,
+			rg::graph_group_default(),
+			2400,
 			50,
 			std::vector<rg::ParameterValue>{
 				rg::ParameterValue{
@@ -1498,9 +1798,10 @@ auto rg::demo_graph(
 	);
 
 	[[maybe_unused]] const rg::NodeInstance taau = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.taau",
+			rg::graph_group_default(),
 			800,
 			300,
 			std::vector<rg::ParameterValue>{
@@ -1519,10 +1820,11 @@ auto rg::demo_graph(
 	);
 
 	[[maybe_unused]] const rg::NodeInstance bloomComposite = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.bloom_composite",
-			2000,
+			rg::graph_group_default(),
+			2600,
 			50,
 			std::vector<rg::ParameterValue>{
 				rg::ParameterValue{
@@ -1535,20 +1837,22 @@ auto rg::demo_graph(
 	);
 
 	[[maybe_unused]] const rg::NodeInstance colorGrade = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.color_grade",
-			2200,
+			postGroup,
+			2990,
 			50,
 			std::vector<rg::ParameterValue>{}
 		)
 	);
 
 	[[maybe_unused]] const rg::NodeInstance toneMap = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.tonemap",
-			2400,
+			postGroup,
+			3220,
 			50,
 			std::vector<rg::ParameterValue>{
 				rg::ParameterValue{
@@ -1566,139 +1870,114 @@ auto rg::demo_graph(
 	);
 
 	[[maybe_unused]] const rg::NodeInstance uiComposite = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.ui_composite",
-			2600,
+			uiGroup,
+			3690,
 			50,
 			std::vector<rg::ParameterValue>{}
 		)
 	);
 
 	[[maybe_unused]] const rg::NodeInstance present = (
-		rg::node_instance_create(
+		DEMO_NODE_CREATE(
 			hGraph,
 			"engine.present",
-			2800,
+			rg::graph_group_default(),
+			4050,
 			50,
 			std::vector<rg::ParameterValue>{}
 		)
 	);
 
 	// -- links
-	rg::node_instance_link(hGraph, sceneUpload, 0, culling, 0);
+	DEMO_LINK(hGraph, culling, 0, depth, 0);
+	DEMO_LINK(hGraph, culling, 0, gbuffer, 0);
 
-	rg::node_instance_link(hGraph, culling, 0, depth, 0);
-	rg::node_instance_link(hGraph, culling, 0, shadowCulling, 0);
-	rg::node_instance_link(hGraph, culling, 0, gbuffer, 0);
-	rg::node_instance_link(hGraph, culling, 0, clusterBuild, 0);
-	rg::node_instance_link(hGraph, culling, 0, particleSimulation, 1);
+	DEMO_LINK(hGraph, depth, 0, hiz, 0);
+	DEMO_LINK(hGraph, depth, 0, ssao, 0);
 
-	rg::node_instance_link(hGraph, depth, 0, hiz, 0);
-	rg::node_instance_link(hGraph, depth, 0, ssao, 0);
+	DEMO_LINK(hGraph, shadowCulling, 0, shadowMaps, 0);
 
-	rg::node_instance_link(hGraph, shadowCulling, 0, shadowMaps, 0);
+	DEMO_LINK(hGraph, gbuffer, 0, decals, 1);
+	DEMO_LINK(hGraph, gbuffer, 1, decals, 2);
+	DEMO_LINK(hGraph, gbuffer, 1, ssao, 1);
+	DEMO_LINK(hGraph, gbuffer, 1, ssr, 2);
+	DEMO_LINK(hGraph, gbuffer, 2, decals, 3);
+	DEMO_LINK(hGraph, gbuffer, 3, taau, 1);
+	DEMO_LINK(hGraph, gbuffer, 4, decals, 0);
+	DEMO_LINK(hGraph, gbuffer, 4, opaqueLighting, 3);
+	DEMO_LINK(hGraph, gbuffer, 4, ssr, 1);
+	DEMO_LINK(hGraph, gbuffer, 4, volumetricFog, 1);
+	DEMO_LINK(hGraph, gbuffer, 4, particleRender, 1);
+	DEMO_LINK(hGraph, gbuffer, 4, transparency, 1);
+	DEMO_LINK(hGraph, gbuffer, 4, taau, 2);
 
-	rg::node_instance_link(hGraph, gbuffer, 0, decals, 1);
-	rg::node_instance_link(hGraph, gbuffer, 1, decals, 2);
-	rg::node_instance_link(hGraph, gbuffer, 2, decals, 3);
-	rg::node_instance_link(hGraph, gbuffer, 3, taau, 1);
-	rg::node_instance_link(hGraph, gbuffer, 4, decals, 0);
-	rg::node_instance_link(hGraph, gbuffer, 4, ssao, 0);
-	rg::node_instance_link(hGraph, gbuffer, 4, opaqueLighting, 3);
-	rg::node_instance_link(hGraph, gbuffer, 4, particleRender, 1);
-	rg::node_instance_link(hGraph, gbuffer, 4, taau, 2);
+	DEMO_LINK(hGraph, decals, 0, opaqueLighting, 0);
+	DEMO_LINK(hGraph, decals, 1, opaqueLighting, 1);
+	DEMO_LINK(hGraph, decals, 2, opaqueLighting, 2);
 
-	rg::node_instance_link(hGraph, decals, 0, opaqueLighting, 0);
-	rg::node_instance_link(hGraph, decals, 1, opaqueLighting, 1);
-	rg::node_instance_link(hGraph, decals, 2, opaqueLighting, 2);
+	DEMO_LINK(hGraph, hiz, 0, clusterBuild, 0);
+	DEMO_LINK(hGraph, hiz, 0, ssr, 3);
 
-	rg::node_instance_link(hGraph, hiz, 0, clusterBuild, 1);
-	rg::node_instance_link(hGraph, hiz, 0, ssr, 3);
+	DEMO_LINK(hGraph, ssao, 0, opaqueLighting, 4);
 
-	rg::node_instance_link(hGraph, ssao, 0, opaqueLighting, 4);
+	DEMO_LINK(hGraph, shadowMaps, 0, opaqueLighting, 6);
+	DEMO_LINK(hGraph, shadowMaps, 0, volumetricFog, 2);
 
-	rg::node_instance_link(hGraph, shadowMaps, 0, opaqueLighting, 6);
+	DEMO_LINK(hGraph, opaqueLighting, 0, volumetricFog, 0);
+	DEMO_LINK(hGraph, opaqueLighting, 0, ssr, 0);
+	DEMO_LINK(hGraph, opaqueLighting, 0, histogram, 0);
+	DEMO_LINK(hGraph, opaqueLighting, 0, bloomExtract, 0);
 
-	rg::node_instance_link(hGraph, clusterBuild, 0, opaqueLighting, 7);
+	DEMO_LINK(hGraph, particleSimulation, 0, particleRender, 0);
 
-	rg::node_instance_link(hGraph, opaqueLighting, 0, volumetricFog, 0);
-	rg::node_instance_link(hGraph, opaqueLighting, 0, ssr, 0);
-	rg::node_instance_link(hGraph, opaqueLighting, 0, histogram, 0);
-	rg::node_instance_link(hGraph, opaqueLighting, 0, bloomExtract, 0);
-	rg::node_instance_link(hGraph, opaqueLighting, 0, transparency, 0);
+	DEMO_LINK(hGraph, volumetricFog, 0, transparency, 0);
 
-	rg::node_instance_link(hGraph, particleSimulation, 0, particleRender, 0);
+	DEMO_LINK(hGraph, histogram, 0, exposure, 0);
+	DEMO_LINK(hGraph, exposure, 0, exposure, 1);
 
-	rg::node_instance_link(hGraph, volumetricFog, 0, transparency, 0);
-
-	rg::node_instance_link(hGraph, histogram, 0, exposure, 0);
-
-	rg::node_instance_link(hGraph, bloomExtract, 0, bloomDownsample0, 0);
-	rg::node_instance_link(hGraph, bloomDownsample0, 0, bloomDownsample1, 0);
-	rg::node_instance_link(hGraph, bloomDownsample1, 0, bloomDownsample2, 0);
-
-	rg::node_instance_link(
-		hGraph,
-		bloomDownsample2,
-		0,
-		bloomUpsample0,
-		0
+	// -- group field links
+	DEMO_GROUP_LINK(
+		hGraph, mainCamera, 0, mainGroup, kDemoFieldRenderCamera
 	);
-
-	rg::node_instance_link(
-		hGraph,
-		bloomDownsample1,
-		0,
-		bloomUpsample0,
-		1
+	DEMO_GROUP_LINK(
+		hGraph, lightCamera, 0, shadowGroup, kDemoFieldRenderCamera
 	);
-
-	rg::node_instance_link(
-		hGraph,
-		bloomUpsample0,
-		0,
-		bloomUpsample1,
-		0
+	DEMO_GROUP_LINK(hGraph, uiCamera, 0, uiGroup, kDemoFieldRenderCamera);
+	DEMO_GROUP_LINK(hGraph, shadowProxy, 0, shadowGroup, kDemoFieldScene);
+	DEMO_GROUP_LINK(
+		hGraph, clusterBuild, 0, lightingGroup, kDemoFieldLightClusters
 	);
+	DEMO_GROUP_LINK(hGraph, exposure, 0, postGroup, kDemoFieldExposure);
 
-	rg::node_instance_link(
-		hGraph,
-		bloomDownsample0,
-		0,
-		bloomUpsample1,
-		1
+	DEMO_LINK(hGraph, bloomExtract, 0, bloomDownsample0, 0);
+	DEMO_LINK(hGraph, bloomDownsample0, 0, bloomDownsample1, 0);
+	DEMO_LINK(hGraph, bloomDownsample1, 0, bloomDownsample2, 0);
+
+	DEMO_LINK(hGraph, bloomDownsample2, 0, bloomUpsample0, 0);
+	DEMO_LINK(hGraph, bloomDownsample1, 0, bloomUpsample0, 1);
+
+	DEMO_LINK(hGraph, bloomUpsample0, 0, bloomUpsample1, 0);
+	DEMO_LINK(hGraph, bloomDownsample0, 0, bloomUpsample1, 1);
+
+	DEMO_LINK(hGraph, bloomUpsample1, 0, bloomUpsample2, 0);
+	DEMO_LINK(hGraph, bloomExtract, 0, bloomUpsample2, 1);
+
+	DEMO_LINK(hGraph, transparency, 0, taau, 0);
+	DEMO_LINK(hGraph, taau, 0, taau, 3);
+
+	DEMO_LINK(hGraph, taau, 0, bloomComposite, 0);
+	DEMO_LINK(hGraph, bloomUpsample2, 0, bloomComposite, 1);
+
+	DEMO_LINK(hGraph, bloomComposite, 0, colorGrade, 0);
+	DEMO_LINK(hGraph, colorGrade, 0, toneMap, 0);
+	DEMO_LINK(hGraph, toneMap, 0, uiComposite, 0);
+	DEMO_LINK(hGraph, uiComposite, 0, present, 0);
+
+	// -- check everything was added
+	rg_assert(
+		failedLine == 0, "demo graph failed to add at line %d", failedLine
 	);
-
-	rg::node_instance_link(
-		hGraph,
-		bloomUpsample1,
-		0,
-		bloomUpsample2,
-		0
-	);
-
-	rg::node_instance_link(
-		hGraph,
-		bloomExtract,
-		0,
-		bloomUpsample2,
-		1
-	);
-
-	rg::node_instance_link(hGraph, transparency, 0, taau, 0);
-
-	rg::node_instance_link(hGraph, taau, 0, bloomComposite, 0);
-
-	rg::node_instance_link(hGraph, bloomUpsample2, 0, bloomComposite, 1);
-
-	rg::node_instance_link(hGraph, bloomComposite, 0, colorGrade, 0);
-
-	rg::node_instance_link(hGraph, colorGrade, 0, toneMap, 0);
-
-	rg::node_instance_link(hGraph, exposure, 0, toneMap, 1);
-
-	rg::node_instance_link(hGraph, toneMap, 0, uiComposite, 0);
-
-	rg::node_instance_link(hGraph, uiComposite, 0, present, 0);
 }

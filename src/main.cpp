@@ -7,6 +7,7 @@
 #include <imnodes.h>
 
 #include "rendergraph.hpp"
+#include "log.hpp"
 
 int main() {
 	if (!glfwInit()) { return 1; }
@@ -47,6 +48,7 @@ int main() {
 		ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
 
 		rg::ui_draw(graph);
+		rg_imgui_draw();
 
 		ImGui::Render();
 		int w, h;

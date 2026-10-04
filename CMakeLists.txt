@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(graph_editor CXX)
+project(graph-editor CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -44,10 +44,11 @@ target_include_directories(imnodes PUBLIC third-party/imnodes)
 target_link_libraries(imnodes PUBLIC imgui)
 
 add_executable(
-	graph_editor
+	graph-editor
 	src/main.cpp
+	src/log.cpp
 	src/rendergraph.cpp
 	src/rendergraph-demo.cpp
 )
-target_link_libraries(graph_editor PRIVATE imnodes "-framework OpenGL")
-target_compile_definitions(graph_editor PRIVATE GL_SILENCE_DEPRECATION)
+target_link_libraries(graph-editor PRIVATE imnodes "-framework OpenGL")
+target_compile_definitions(graph-editor PRIVATE GL_SILENCE_DEPRECATION)

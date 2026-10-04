@@ -10,6 +10,82 @@
 #include <map>
 #include <memory>
 #include <unordered_map>
+#include <set>
+
+#include "log.hpp"
+
+// -----------------------------------------------------------------------------
+// -- imgui: group
+// -----------------------------------------------------------------------------
+
+namespace
+{
+	struct ImplGroup
+	{
+		// -- metadata
+		uint32_t id = 0;
+		std::string name;
+
+		// -- positions
+		float x = 0.0f;
+		float y = 0.0f;
+		float w = 260.0f;
+		float h = 180.0f;
+
+		// -- data
+		rg::Group hParentGroup = {};
+		std::vector<rg::Group> hChildrenGroup;
+		std::vector<rg::NodeInstance> hNodes;
+
+		// -- global layout
+		// indices of the fields this group overrides, in enable order
+		std::vector<uint32_t> enabledFields;
+
+		bool collapsed = false;
+
+		uint32_t color = 0x3A3A46u;
+	};
+
+	struct ImplGraph;
+	struct ImplGraphState;
+
+	struct ImplGroupValidateFni {
+		// if non-null, store offending ids
+		std::vector<uint32_t> * outNodes = nullptr;
+		// if non-null, store offending ids
+		std::vector<uint32_t> * outGroups = nullptr;
+	};
+}
+
+auto impl_group_contains(
+	ImplGroup const & group,
+	float const x,
+	float const y
+) -> bool;
+
+auto impl_group(
+	ImplGraph & graph,
+	int32_t const groupId
+) -> ImplGroup *;
+
+auto impl_group_translate(
+	ImplGraph & graph,
+	ImplGroup & group,
+	float const dx,
+	float const dy
+) -> void;
+
+// true if every node and group is either fully inside or fully outside of
+// every other group
+auto impl_group_validate(
+	ImplGraphState const & state,
+	ImplGroupValidateFni const & fni = {}
+) -> bool;
+
+// rebuild group parents, children and nodes from positions; state must be valid
+auto impl_group_recalculate(
+	ImplGraphState & state
+) -> void;
 
 // -----------------------------------------------------------------------------
 // -- impl types
@@ -25,21 +101,31 @@ namespace
 		std::vector<rg::ParameterValue> parameterValues;
 		int32_t posX = 0;
 		int32_t posY = 0;
+		// size from imnodes' last draw
+		float width = 0.0f;
+		float height = 0.0f;
 	};
 
 	// nodeA.pinA (output) -> nodeB.pinB (input)
+	// or, if groupB is non-zero, nodeA.pinA (output) -> groupB.fieldB
 	struct ImplLink {
 		uint32_t id;
 		uint32_t nodeA;
 		uint32_t pinA;
+		// 0 if the link ends at a group field
 		uint32_t nodeB;
 		uint32_t pinB;
+		// 0 if the link ends at a node pin
+		uint32_t groupB = 0;
+		uint32_t fieldB = 0;
 	};
 
-	// everything that undo/redo restores; copied whole for every undo step
+	// current graph state
 	struct ImplGraphState {
-		// ordered so iteration (and later compilation) is deterministic
-		std::map<uint32_t, ImplNodeInstance> nodes;
+		// all group entries, element 0 is the parent container
+		std::map<uint32_t, ImplGroup> groups;
+		// flat list of all nodes
+		std::unordered_map<uint32_t, ImplNodeInstance> nodes;
 		std::vector<ImplLink> links;
 	};
 
@@ -50,22 +136,54 @@ namespace
 		std::vector<ImplGraphState> redoStack;
 		uint32_t transactionDepth = 0;
 		bool transactionRecorded = false;
+		// set when an edit is rejected and reverted
+		bool editReverted = false;
 
-		// never restored by undo, so ids are never reused
+		// next id to assign to a new node
 		uint32_t nextNodeId = 1;
+
+		// next id to assign to a new link
 		uint32_t nextLinkId = 1;
 
 		// ui state
 		ImNodesEditorContext * editor = nullptr;
 
-		// model positions need to be pushed to imnodes next frame
 		bool positionsDirty = true;
 		struct {
-			uint32_t contextNode = 0; // right-clicked
-			uint32_t contextLink = 0; // right-clicked
-			uint32_t pressNode = 0; // left-pressed; opens properties on click
+			// right-clicked
+			uint32_t contextNode = 0;
+			// right-clicked
+			uint32_t contextLink = 0;
 			uint32_t propertiesNode = 0;
+			// double-clicked; opens properties on mouse release
+			uint32_t propertiesNodePending = 0;
 			char nameBuffer[128] = {};
+
+			// -- camera panning when the left mouse was pressed
+			ImVec2 pressPanning = {};
+
+			// -- track state during group header drag and resize
+			bool groupDragRecorded = false;
+			ImVec2 groupDragPosDelta = {};
+			ImVec2 groupDragGridScreenPos = {};
+
+			// -- group popups
+			struct {
+				// right-clicked
+				uint32_t contextGroup = 0;
+				uint32_t renameGroup = 0;
+			} popup;
+
+			// -- selection
+			struct {
+				std::vector<uint32_t> groups;
+
+				// -- track state during box selection
+				bool boxActive = false;
+				ImVec2 boxStartGridPos = {};
+				std::vector<uint32_t> boxBaseGroups;
+			} selected;
+
 		} ui;
 	};
 }
@@ -78,6 +196,8 @@ static constexpr size_t kUndoStackMax = 256;
 
 static std::vector<rg::NodeTypeCi> sImplNodeTypes; // indexed by id - 1
 static std::unordered_map<std::string, uint32_t> sImplNodeTypeUniqueNameToId;
+static rg::GlobalLayoutCi sImplGlobalLayout;
+static bool sImplGlobalLayoutRegistered = false;
 static std::unordered_map<uint32_t, std::unique_ptr<ImplGraph>> sImplGraphs;
 
 // -----------------------------------------------------------------------------
@@ -122,6 +242,20 @@ static auto impl_link_find_into(
 	return nullptr;
 }
 
+static auto impl_link_find_into_group(
+	ImplGraph const & graph,
+	uint32_t const groupB,
+	uint32_t const fieldB
+) -> ImplLink const *
+{
+	for (ImplLink const & link : graph.state.links) {
+		if (link.groupB == groupB && link.fieldB == fieldB) {
+			return &link;
+		}
+	}
+	return nullptr;
+}
+
 // -----------------------------------------------------------------------------
 // -- impl undo recording
 // -----------------------------------------------------------------------------
@@ -137,7 +271,7 @@ static auto impl_edit_record(
 		if (graph.transactionRecorded) { return; }
 		graph.transactionRecorded = true;
 	}
-	graph.undoStack.push_back(graph.state);
+	graph.undoStack.emplace_back(graph.state);
 	if (graph.undoStack.size() > kUndoStackMax) {
 		graph.undoStack.erase(graph.undoStack.begin());
 	}
@@ -150,19 +284,45 @@ static auto impl_edit_record(
 
 // images and external images are both images; where the resource comes from
 // doesn't change what can be connected
-static auto impl_pin_kinds_compatible(
-	rg::PinKind const a,
-	rg::PinKind const b
+static auto impl_pin_compatible(
+	rg::PinDesc const a,
+	rg::PinDesc const b
 ) -> bool
 {
 	auto const isImage = [](rg::PinKind const k) {
 		return k == rg::PinKind::image || k == rg::PinKind::externalImage;
 	};
-	return a == b || (isImage(a) && isImage(b));
+	bool const bothImages = isImage(a.kind) && isImage(b.kind);
+	if (bothImages)
+	{
+		return true;
+	}
+	if (a.kind == rg::PinKind::buffer && b.kind == rg::PinKind::buffer)
+	{
+		return a.bufferType == b.bufferType;
+	}
+	return false;
+}
+
+// appends the ids of the nodes in the group and all of its nested groups
+static auto impl_group_collect_nodes(
+	ImplGraph const & graph,
+	uint32_t const groupId,
+	std::vector<uint32_t> & outNodes
+) -> void
+{
+	ImplGroup const & group = graph.state.groups.at(groupId);
+	for (rg::NodeInstance const hNode : group.hNodes) {
+		outNodes.emplace_back(hNode.id);
+	}
+	for (rg::Group const hChild : group.hChildrenGroup) {
+		impl_group_collect_nodes(graph, hChild.id, outNodes);
+	}
 }
 
 // is 'target' reachable from 'start' following links forward? Links into
 // previous-frame inputs are ignored, as they don't order passes within a frame.
+// A link into a group field leads to all nodes in the group.
 static auto impl_node_reachable(
 	ImplGraph const & graph,
 	uint32_t const start,
@@ -178,15 +338,23 @@ static auto impl_node_reachable(
 		if (std::find(visited.begin(), visited.end(), nodeId) != visited.end()) {
 			continue;
 		}
-		visited.push_back(nodeId);
+		visited.emplace_back(nodeId);
 		for (ImplLink const & link : graph.state.links) {
 			if (link.nodeA != nodeId) { continue; }
+
+			// -- follow a group field link to the nodes in the group
+			if (link.groupB != 0) {
+				impl_group_collect_nodes(graph, link.groupB, stack);
+				continue;
+			}
+
+			// -- follow a node pin link
 			ImplNodeInstance const & nodeB = graph.state.nodes.at(link.nodeB);
 			rg::PinDesc const & pinB = impl_node_type(nodeB.type).pinIn[link.pinB];
 			if (pinB.pinIn.temporal == rg::PinResourceTemporal::previousFrame) {
 				continue;
 			}
-			stack.push_back(link.nodeB);
+			stack.emplace_back(link.nodeB);
 		}
 	}
 	return false;
@@ -213,7 +381,7 @@ static auto impl_link_check(
 
 	rg::PinDesc const & descA = typeA.pinOut[pinA];
 	rg::PinDesc const & descB = typeB.pinIn[pinB];
-	if (!impl_pin_kinds_compatible(descA.kind, descB.kind)) { return false; }
+	if (!impl_pin_compatible(descA, descB)) { return false; }
 
 	// with allowReplace the caller removes the input's existing link first
 	if (!allowReplace && impl_link_find_into(graph, nodeBId, pinB)) {
@@ -229,6 +397,66 @@ static auto impl_link_check(
 	}
 
 	return true;
+}
+
+// returns if nodeA is reachable from the group's nodes
+static auto impl_group_field_forms_cycle(
+	ImplGraph const & graph,
+	uint32_t const nodeAId,
+	uint32_t const groupId
+) -> bool
+{
+	std::vector<uint32_t> groupNodes;
+	impl_group_collect_nodes(graph, groupId, groupNodes);
+	for (uint32_t const groupNodeId : groupNodes) {
+		if (impl_node_reachable(graph, groupNodeId, nodeAId)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static auto impl_group_field_link_check(
+	ImplGraph const & graph,
+	uint32_t const nodeAId,
+	uint32_t const pinA,
+	uint32_t const groupId,
+	uint32_t const field,
+	bool const allowReplace
+) -> bool
+{
+	ImplNodeInstance const * const nodeA = impl_node_find(graph, nodeAId);
+	auto const groupIt = graph.state.groups.find(groupId);
+	if (!nodeA || groupId == 0 || groupIt == graph.state.groups.end()) {
+		return false;
+	}
+
+	// -- check the pin and the field
+	rg::NodeTypeCi const & typeA = impl_node_type(nodeA->type);
+	if (pinA >= typeA.pinOut.size()) { return false; }
+	if (field >= sImplGlobalLayout.fields.size()) { return false; }
+
+	std::vector<uint32_t> const & enabled = groupIt->second.enabledFields;
+	if (std::find(enabled.begin(), enabled.end(), field) == enabled.end()) {
+		return false;
+	}
+
+	rg::PinDesc const & descA = typeA.pinOut[pinA];
+	rg::GlobalFieldDesc const & descB = sImplGlobalLayout.fields[field];
+	bool const compatible = (
+		descA.kind == rg::PinKind::buffer
+		&& descA.bufferType == descB.bufferType
+	);
+	if (!compatible) { return false; }
+
+	// -- check the field is not already linked
+	// with allowReplace the caller removes the field's existing link first
+	if (!allowReplace && impl_link_find_into_group(graph, groupId, field)) {
+		return false;
+	}
+
+	// -- check for a cycle
+	return !impl_group_field_forms_cycle(graph, nodeAId, groupId);
 }
 
 // -----------------------------------------------------------------------------
@@ -257,7 +485,7 @@ auto rg::register_node_type(
 		!sImplNodeTypeUniqueNameToId.contains(ci.uniqueName)
 		&& "node type registered twice"
 	);
-	sImplNodeTypes.push_back(ci);
+	sImplNodeTypes.emplace_back(ci);
 	uint32_t const id = static_cast<uint32_t>(sImplNodeTypes.size());
 	sImplNodeTypeUniqueNameToId[ci.uniqueName] = id;
 	return { id };
@@ -272,6 +500,19 @@ auto rg::node_type_find(
 }
 
 // -----------------------------------------------------------------------------
+// -- global layout
+// -----------------------------------------------------------------------------
+
+auto rg::register_global_layout(
+	GlobalLayoutCi const & ci
+) -> void
+{
+	rg_assert(!sImplGlobalLayoutRegistered, "global layout registered twice");
+	sImplGlobalLayout = ci;
+	sImplGlobalLayoutRegistered = true;
+}
+
+// -----------------------------------------------------------------------------
 // -- graph
 // -----------------------------------------------------------------------------
 
@@ -282,6 +523,18 @@ auto rg::graph_create() -> rg::Graph
 	auto graph = std::make_unique<ImplGraph>();
 	graph->editor = ImNodes::EditorContextCreate();
 	sImplGraphs[id] = std::move(graph);
+	// always has a group of 0 for parent container
+	sImplGraphs[id]->state.groups.emplace(
+		0,
+		ImplGroup {
+			.id = 0,
+			.name = "Parent",
+			.x = -990000.0f,
+			.y = -990000.0f,
+			.w = +990000.0f,
+			.h = +990000.0f,
+		}
+	);
 	return { id };
 }
 
@@ -294,12 +547,429 @@ auto rg::graph_destroy(
 }
 
 // -----------------------------------------------------------------------------
+// -- imgui: group
+// -----------------------------------------------------------------------------
+
+auto impl_group_contains(
+	ImplGroup const & group,
+	float const x,
+	float const y
+) -> bool
+{
+	return (
+		x >= group.x && x <= group.x + group.w 
+		&& y >= group.y && y <= group.y + group.h
+	);
+}
+
+auto impl_group(
+	ImplGraph & graph,
+	int32_t const groupId
+) -> ImplGroup *
+{
+	auto const it = graph.state.groups.find(groupId);
+	return it == graph.state.groups.end() ? nullptr : &it->second;
+}
+
+auto impl_group_translate(
+	ImplGraph & graph,
+	ImplGroup & group,
+	float const dx,
+	float const dy
+) -> void
+{
+	group.x += dx;
+	group.y += dy;
+	for (rg::Group const hChild : group.hChildrenGroup) {
+		ImplGroup & child = *impl_group(graph, hChild.id);
+		impl_group_translate(graph, child, dx, dy);
+	}
+	for (rg::NodeInstance const hNode : group.hNodes) {
+		ImplNodeInstance & node = graph.state.nodes.at(hNode.id);
+		node.posX += static_cast<int32_t>(dx);
+		node.posY += static_cast<int32_t>(dy);
+	}
+}
+
+// width of group's pin column
+constexpr float kGroupPinColumnWidth = 120.0f;
+
+namespace
+{
+	struct ImplRect {
+		float x;
+		float y;
+		float w;
+		float h;
+	};
+}
+
+static auto impl_rect_group(
+	ImplGroup const & group
+) -> ImplRect
+{
+	return { group.x, group.y, group.w, group.h };
+}
+
+// the group's rect excluding its pin column
+static auto impl_rect_group_content(
+	ImplGroup const & group
+) -> ImplRect
+{
+	return {
+		group.x + kGroupPinColumnWidth,
+		group.y,
+		group.w - kGroupPinColumnWidth,
+		group.h
+	};
+}
+
+static auto impl_rect_node(
+	ImplNodeInstance const & node
+) -> ImplRect
+{
+	return { (float)node.posX, (float)node.posY, node.width, node.height };
+}
+
+static auto impl_rect_area(
+	ImplRect const rect
+) -> float
+{
+	return rect.w * rect.h;
+}
+
+static auto impl_rect_overlaps(
+	ImplRect const a,
+	ImplRect const b
+) -> bool
+{
+	return (
+		a.x < b.x + b.w && b.x < a.x + a.w
+		&& a.y < b.y + b.h && b.y < a.y + a.h
+	);
+}
+
+static auto impl_rect_contains(
+	ImplRect const outer,
+	ImplRect const inner
+) -> bool
+{
+	return (
+		inner.x >= outer.x && inner.x + inner.w <= outer.x + outer.w
+		&& inner.y >= outer.y && inner.y + inner.h <= outer.y + outer.h
+	);
+}
+
+auto impl_group_validate(
+	ImplGraphState const & state,
+	ImplGroupValidateFni const & fni
+) -> bool
+{
+	auto const storeOffender = [](
+		std::vector<uint32_t> * const out,
+		uint32_t const offenderId
+	) {
+		if (
+			out && std::find(out->begin(), out->end(), offenderId) == out->end()
+		) {
+			out->emplace_back(offenderId);
+		}
+	};
+	bool const breakOnFirstInvalid = !fni.outNodes && !fni.outGroups;
+	bool valid = true;
+
+	for (auto const & [groupId, group] : state.groups) {
+		// group 0 contains everything
+		if (groupId == 0) { continue; }
+		ImplRect const groupRect = impl_rect_group(group);
+		ImplRect const contentRect = impl_rect_group_content(group);
+
+		// -- validate node partially intersecting group
+		for (auto const & [nodeId, node] : state.nodes) {
+			ImplRect const nodeRect = impl_rect_node(node);
+			// a node overlapping the group must be inside its content rect
+			if (
+				!impl_rect_overlaps(groupRect, nodeRect)
+				|| impl_rect_contains(contentRect, nodeRect)
+			) {
+				continue;
+			}
+			valid = false;
+			storeOffender(fni.outNodes, nodeId);
+			storeOffender(fni.outGroups, groupId);
+			if (breakOnFirstInvalid) { return false; }
+		}
+
+		// -- validate group partially intersecting group
+		for (auto const & [otherGroupId, otherGroup] : state.groups) {
+			if (otherGroupId == 0 || otherGroupId <= groupId) { continue; }
+			ImplRect const otherRect = impl_rect_group(otherGroup);
+			ImplRect const otherContentRect = (
+				impl_rect_group_content(otherGroup)
+			);
+			if (!impl_rect_overlaps(groupRect, otherRect)) { continue; }
+
+			// an identical rect is not nested, so it is a partial intersection.
+			// A group inside the other's pin column is not nested.
+			bool const nested = (
+				(
+					impl_rect_contains(contentRect, otherRect)
+					&& impl_rect_area(groupRect) > impl_rect_area(otherRect)
+				)
+				|| (
+					impl_rect_contains(otherContentRect, groupRect)
+					&& impl_rect_area(otherRect) > impl_rect_area(groupRect)
+				)
+			);
+			if (nested) { continue; }
+			valid = false;
+			storeOffender(fni.outGroups, groupId);
+			storeOffender(fni.outGroups, otherGroupId);
+			if (breakOnFirstInvalid) { return false; }
+		}
+	}
+	return valid;
+}
+
+auto impl_group_recalculate(
+	ImplGraphState & state
+) -> void
+{
+	// finds the parent group of the node (if hGroup is 0) or group
+	auto const findParentGroup = [&](
+		ImplRect const rect,
+		rg::Group const hGroup
+	) -> rg::Group
+	{
+		// -- find best fitting parent group
+		rg::Group hParentGroup = { 0 };
+		float parentArea = 0.0f;
+		for (auto const & [candidateId, candidate] : state.groups) {
+			if (candidateId == 0 || candidateId == hGroup.id) { continue; }
+
+			// -- check if candidate contains this node or group
+			ImplRect const candidateRect = impl_rect_group(candidate);
+			if (
+				!impl_rect_contains(impl_rect_group_content(candidate), rect)
+			) {
+				continue;
+			}
+
+			float const candidateArea = impl_rect_area(candidateRect);
+			if (hParentGroup.id == 0 || candidateArea < parentArea) {
+				hParentGroup = { candidateId };
+				parentArea = candidateArea;
+			}
+		}
+		return hParentGroup;
+	};
+
+	// -- clear groups
+	for (auto & [groupId, group] : state.groups) {
+		group.hChildrenGroup.clear();
+		group.hNodes.clear();
+	}
+
+	// -- assign parent to each group
+	for (auto & [groupId, group] : state.groups) {
+		if (groupId == 0) { continue; }
+		group.hParentGroup = findParentGroup(
+			impl_rect_group(group), rg::Group { .id = group.id }
+		);
+		(
+			state
+			.groups.at(group.hParentGroup.id)
+			.hChildrenGroup.emplace_back(rg::Group { .id = group.id })
+		);
+	}
+
+	// -- sort node ids
+	std::vector<rg::NodeInstance> const hNodes = [&]() {
+		std::vector<rg::NodeInstance> sorted;
+		for (auto const & [nodeId, node] : state.nodes) {
+			sorted.emplace_back(
+				rg::NodeInstance { .id = nodeId, .type = node.type }
+			);
+		}
+		std::sort(
+			sorted.begin(),
+			sorted.end(),
+			[](auto const & a, auto const & b) { return a.id < b.id; }
+		);
+		return sorted;
+	}();
+
+	// -- assign each node to its parent group in id order
+	for (rg::NodeInstance const hNode : hNodes) {
+		ImplNodeInstance const & node = state.nodes.at(hNode.id);
+		rg::Group const hParentGroup = findParentGroup(
+			impl_rect_node(node), rg::Group { 0 }
+		);
+		state.groups.at(hParentGroup.id).hNodes.emplace_back(hNode);
+	}
+}
+
+// true if no group field link forms a cycle; group membership must be current
+static auto impl_group_links_validate(
+	ImplGraph const & graph
+) -> bool
+{
+	for (ImplLink const & link : graph.state.links) {
+		if (link.groupB == 0) { continue; }
+		if (impl_group_field_forms_cycle(graph, link.nodeA, link.groupB)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+// validates the groups then recalculates them. If invalid, reverts the last
+// recorded edit and returns false.
+static auto impl_edit_resolve(
+	ImplGraph & graph
+) -> bool
+{
+	// -- do not resolve while in a transaction
+	if (graph.transactionDepth > 0) { return true; }
+
+	// -- revert the last recorded edit if a group is partially intersected
+	auto const revert = [&](char const * const reason) {
+		rg_error("edit reverted: %s", reason);
+		graph.state = std::move(graph.undoStack.back());
+		graph.undoStack.pop_back();
+		graph.positionsDirty = true;
+		graph.editReverted = true;
+	};
+	if (!impl_group_validate(graph.state)) {
+		revert("partially intersects a group");
+		return false;
+	}
+
+	// -- update group membership
+	impl_group_recalculate(graph.state);
+
+	// -- revert the last recorded edit if a group field link forms a cycle
+	if (!impl_group_links_validate(graph)) {
+		revert("links a node into a group field it depends on");
+		return false;
+	}
+	return true;
+}
+
+// -----------------------------------------------------------------------------
+// -- edits: group
+// -----------------------------------------------------------------------------
+
+auto rg::graph_group_create(
+	rg::Graph const hGraph,
+	std::string const & name,
+	rg::Group const hParentGroup,
+	int32_t const positionX,
+	int32_t const positionY,
+	int32_t const width,
+	int32_t const height
+) -> Group
+{
+	ImplGraph & graph = impl_graph(hGraph);
+	impl_edit_record(graph);
+	ImplGroup const group = {
+		.id = graph.state.groups.rbegin()->first + 1,
+		.name = name,
+		.x = static_cast<float>(positionX),
+		.y = static_cast<float>(positionY),
+		.w = static_cast<float>(width),
+		.h = static_cast<float>(height),
+		.hParentGroup = hParentGroup,
+	};
+	auto const hGroup = rg::Group { .id = group.id };
+
+	// -- add to parent group
+	graph.state.groups.at(hParentGroup.id).hChildrenGroup.emplace_back(hGroup);
+	// -- add to flat list
+	graph.state.groups.emplace(hGroup.id, group);
+
+	if (!impl_edit_resolve(graph)) {
+		return rg::graph_group_default();
+	}
+	return hGroup;
+}
+
+auto rg::graph_group_default() -> rg::Group
+{
+	return { 0 };
+}
+
+auto rg::graph_group_destroy(
+	rg::Graph const hGraph,
+	rg::Group const hGroup
+) -> void
+{
+	ImplGraph & graph = impl_graph(hGraph);
+	if (hGroup.id == 0 || !impl_group(graph, hGroup.id)) { return; }
+	impl_edit_record(graph);
+	// -- delete links into the group's fields
+	std::erase_if(graph.state.links, [&](ImplLink const & link) {
+		return link.groupB == hGroup.id;
+	});
+	// -- delete from flat list
+	graph.state.groups.erase(hGroup.id);
+	impl_edit_resolve(graph);
+}
+
+auto rg::graph_group_set_field_enabled(
+	rg::Graph const hGraph,
+	rg::Group const hGroup,
+	uint32_t const field,
+	bool const enabled
+) -> void
+{
+	ImplGraph & graph = impl_graph(hGraph);
+	ImplGroup * const group = impl_group(graph, hGroup.id);
+	if (!group || hGroup.id == 0) { return; }
+	if (field >= sImplGlobalLayout.fields.size()) { return; }
+
+	std::vector<uint32_t> & enabledFields = group->enabledFields;
+	bool const wasEnabled = (
+		std::find(enabledFields.begin(), enabledFields.end(), field)
+		!= enabledFields.end()
+	);
+	if (wasEnabled == enabled) { return; }
+	impl_edit_record(graph);
+
+	// -- enable the field
+	if (enabled) {
+		enabledFields.emplace_back(field);
+		return;
+	}
+
+	// -- disable the field and delete its links
+	std::erase(enabledFields, field);
+	std::erase_if(graph.state.links, [&](ImplLink const & link) {
+		return link.groupB == hGroup.id && link.fieldB == field;
+	});
+}
+
+auto rg::graph_group_set_name(
+	rg::Graph const hGraph,
+	rg::Group const hGroup,
+	std::string const & name
+) -> void
+{
+	ImplGraph & graph = impl_graph(hGraph);
+	ImplGroup * const group = impl_group(graph, hGroup.id);
+	if (!group || group->name == name) { return; }
+	impl_edit_record(graph);
+	group->name = name;
+}
+
+// -----------------------------------------------------------------------------
 // -- edits: nodes
 // -----------------------------------------------------------------------------
 
 auto rg::node_instance_create(
 	Graph const hGraph,
 	std::string const & uniqueName,
+	rg::Group const hGroup,
 	int32_t const positionX,
 	int32_t const positionY,
 	std::vector<rg::ParameterValue> const & parameterValues
@@ -307,7 +977,7 @@ auto rg::node_instance_create(
 {
 	ImplGraph & graph = impl_graph(hGraph);
 	NodeType const type = node_type_find(uniqueName);
-	assert(type.id != 0 && "node type not registered");
+	rg_assert(type.id != 0, "node type not registered: %s", uniqueName.c_str());
 	NodeTypeCi const & ci = impl_node_type(type);
 
 	ImplNodeInstance node = {
@@ -319,14 +989,22 @@ auto rg::node_instance_create(
 	};
 	if (node.parameterValues.empty()) {
 		for (ParameterDesc const & param : ci.parameters) {
-			node.parameterValues.push_back(param.defaultValue);
+			node.parameterValues.emplace_back(param.defaultValue);
 		}
 	}
 	assert(node.parameterValues.size() == ci.parameters.size());
 
 	impl_edit_record(graph);
+	// add to the flat list
 	graph.state.nodes[node.id] = node;
-	return { .id = node.id, .type = type };
+	// then add to the group
+	auto const hNodeInstance = rg::NodeInstance { .id = node.id, .type = type, };
+	graph.state.groups.at(hGroup.id).hNodes.emplace_back(hNodeInstance);
+
+	if (!impl_edit_resolve(graph)) {
+		return rg::NodeInstance { .id = 0 };
+	}
+	return hNodeInstance;
 }
 
 auto rg::node_instance_destroy(
@@ -337,10 +1015,18 @@ auto rg::node_instance_destroy(
 	ImplGraph & graph = impl_graph(hGraph);
 	if (!impl_node_find(graph, hNode.id)) { return; }
 	impl_edit_record(graph);
+	// -- delete links
 	std::erase_if(graph.state.links, [&](ImplLink const & link) {
 		return link.nodeA == hNode.id || link.nodeB == hNode.id;
 	});
+	// -- delete from flat list
 	graph.state.nodes.erase(hNode.id);
+	// -- delete from group
+	for (auto & [groupId, group] : graph.state.groups) {
+		std::erase_if(group.hNodes, [&](NodeInstance const & node) {
+			return node.id == hNode.id;
+		});
+	}
 }
 
 auto rg::node_instance_set_position(
@@ -358,6 +1044,7 @@ auto rg::node_instance_set_position(
 	ImplNodeInstance & n = graph.state.nodes.at(hNode.id);
 	n.posX = positionX;
 	n.posY = positionY;
+	impl_edit_resolve(graph);
 }
 
 auto rg::node_instance_set_name(
@@ -385,8 +1072,10 @@ auto rg::node_instance_can_link(
 	uint32_t const pinB
 ) -> bool
 {
-	return impl_link_check(
-		impl_graph(hGraph), hNodeA.id, pinA, hNodeB.id, pinB, false
+	return (
+		impl_link_check(
+			impl_graph(hGraph), hNodeA.id, pinA, hNodeB.id, pinB, false
+		)
 	);
 }
 
@@ -410,7 +1099,48 @@ auto rg::node_instance_link(
 		.nodeB = hNodeB.id,
 		.pinB = pinB,
 	};
-	graph.state.links.push_back(link);
+	graph.state.links.emplace_back(link);
+	return { link.id };
+}
+
+auto rg::group_field_can_link(
+	Graph const hGraph,
+	NodeInstance const hNodeA,
+	uint32_t const pinA,
+	Group const hGroup,
+	uint32_t const field
+) -> bool
+{
+	return impl_group_field_link_check(
+		impl_graph(hGraph), hNodeA.id, pinA, hGroup.id, field, false
+	);
+}
+
+auto rg::group_field_link(
+	Graph const hGraph,
+	NodeInstance const hNodeA,
+	uint32_t const pinA,
+	Group const hGroup,
+	uint32_t const field
+) -> rg::Link
+{
+	ImplGraph & graph = impl_graph(hGraph);
+	if (!impl_group_field_link_check(
+		graph, hNodeA.id, pinA, hGroup.id, field, false
+	)) {
+		return { 0 };
+	}
+	impl_edit_record(graph);
+	ImplLink const link = {
+		.id = graph.nextLinkId++,
+		.nodeA = hNodeA.id,
+		.pinA = pinA,
+		.nodeB = 0,
+		.pinB = 0,
+		.groupB = hGroup.id,
+		.fieldB = field,
+	};
+	graph.state.links.emplace_back(link);
 	return { link.id };
 }
 
@@ -450,6 +1180,9 @@ auto rg::transaction_end(
 	ImplGraph & graph = impl_graph(hGraph);
 	assert(graph.transactionDepth > 0 && "unbalanced transaction_end");
 	--graph.transactionDepth;
+	if (graph.transactionDepth == 0 && graph.transactionRecorded) {
+		impl_edit_resolve(graph);
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -463,7 +1196,7 @@ auto rg::undo(
 	ImplGraph & graph = impl_graph(hGraph);
 	assert(graph.transactionDepth == 0 && "undo inside a transaction");
 	if (graph.undoStack.empty()) { return false; }
-	graph.redoStack.push_back(std::move(graph.state));
+	graph.redoStack.emplace_back(std::move(graph.state));
 	graph.state = std::move(graph.undoStack.back());
 	graph.undoStack.pop_back();
 	graph.positionsDirty = true;
@@ -477,7 +1210,7 @@ auto rg::redo(
 	ImplGraph & graph = impl_graph(hGraph);
 	assert(graph.transactionDepth == 0 && "redo inside a transaction");
 	if (graph.redoStack.empty()) { return false; }
-	graph.undoStack.push_back(std::move(graph.state));
+	graph.undoStack.emplace_back(std::move(graph.state));
 	graph.state = std::move(graph.redoStack.back());
 	graph.redoStack.pop_back();
 	graph.positionsDirty = true;
@@ -516,17 +1249,32 @@ static auto impl_ui_pin_id(
 	uint32_t const index
 ) -> int
 {
-	assert(nodeId < (1u << 15) && index < (1u << 15));
+	assert(nodeId < (1u << 14) && index < (1u << 15));
 	uint32_t const dirBit = dir == rg::PinDir::out ? 1u : 0u;
 	return static_cast<int>((nodeId << 16) | (dirBit << 15) | index);
+}
+
+// bit 30 marks a group field pin, which node pins never set
+constexpr uint32_t kUiGroupPinBit = 1u << 30;
+
+static auto impl_ui_group_pin_id(
+	uint32_t const groupId,
+	uint32_t const field
+) -> int
+{
+	assert(groupId < (1u << 14) && field < (1u << 15));
+	return static_cast<int>(kUiGroupPinBit | (groupId << 16) | field);
 }
 
 namespace
 {
 	struct ImplUiPin {
+		// node id, or group id if isGroupField
 		uint32_t nodeId;
 		rg::PinDir dir;
+		// pin index, or field index if isGroupField
 		uint32_t index;
+		bool isGroupField;
 	};
 }
 
@@ -535,12 +1283,25 @@ static auto impl_ui_pin_decode(
 ) -> ImplUiPin
 {
 	uint32_t const v = static_cast<uint32_t>(pinId);
+	if (v & kUiGroupPinBit) {
+		return {
+			.nodeId = (v >> 16) & 0x3FFFu,
+			.dir = rg::PinDir::in,
+			.index = v & 0x7FFFu,
+			.isGroupField = true,
+		};
+	}
 	return {
 		.nodeId = v >> 16,
 		.dir = (v >> 15) & 1u ? rg::PinDir::out : rg::PinDir::in,
 		.index = v & 0x7FFFu,
+		.isGroupField = false,
 	};
 }
+
+// imnodes node ids at or above this belong to the node holding a group's pins
+// The group id is the node id minus this value
+constexpr uint32_t kUiGroupNodeIdBase = 1u << 30;
 
 // -----------------------------------------------------------------------------
 // -- ui impl: labels
@@ -680,6 +1441,7 @@ namespace
 		ImU32 secondary; // teal
 		ImU32 tertiary; // green
 		ImU32 rule; // dark red; selection
+		ImU32 error; // bright red; illegal layout
 	};
 
 	struct ImplUiThemeColor {
@@ -703,8 +1465,9 @@ constexpr ImplUiPalette kUiPalette = {
 	.dim = IM_COL32(108, 108, 108, 255),
 	.accent = IM_COL32(215, 164, 95, 255),
 	.secondary = IM_COL32(63, 167, 176, 255),
-	.tertiary = IM_COL32(135, 215, 95, 255),
+	.tertiary = IM_COL32(95, 175, 55, 255),
 	.rule = IM_COL32(95, 10, 10, 255),
+	.error = IM_COL32(220, 55, 45, 255),
 };
 
 constexpr ImplUiThemeColor kUiThemeColors[] = {
@@ -864,6 +1627,123 @@ static auto impl_ui_pin_shape_hollow(
 // they don't read as cycles
 constexpr float kUiTemporalLinkAlpha = 0.4f;
 
+constexpr float kUiHighlightLinkThickness = 3.5f;
+constexpr float kUiGroupHeaderHeight = 20.0f;
+constexpr float kUiGroupHandleSize = 12.0f;
+constexpr float kUiGroupMinWidth = kGroupPinColumnWidth + 80.0f;
+constexpr float kUiGroupMinHeight = 60.0f;
+// grid distance from the group's top left corner to its pin node
+constexpr float kUiGroupPinOffset = 8.0f;
+
+// -----------------------------------------------------------------------------
+// -- ui impl: illegal layout
+// -----------------------------------------------------------------------------
+
+namespace
+{
+	struct ImplUiOffenders {
+		std::vector<uint32_t> nodes;
+		std::vector<uint32_t> groups;
+	};
+}
+
+// finds the nodes and groups partially intersecting a group, using the
+// positions currently shown
+static auto impl_ui_find_offenders(
+	ImplGraph const & graph
+) -> ImplUiOffenders
+{
+	ImplUiOffenders offenders;
+	ImplGroupValidateFni const fni = { &offenders.nodes, &offenders.groups };
+
+	// -- validate the stored positions
+	if (
+		!ImGui::IsMouseDown(ImGuiMouseButton_Left)
+		|| graph.ui.groupDragRecorded
+	) {
+		impl_group_validate(graph.state, fni);
+		return offenders;
+	}
+
+	// -- validate the positions imnodes is moving nodes to
+	ImplGraphState state = graph.state;
+	for (auto & [nodeId, node] : state.nodes) {
+		ImVec2 const pos = ImNodes::GetNodeGridSpacePos((int)nodeId);
+		node.posX = (int32_t)std::lround(pos.x);
+		node.posY = (int32_t)std::lround(pos.y);
+	}
+	impl_group_validate(state, fni);
+	return offenders;
+}
+
+namespace
+{
+	struct ImplUiGroupInput {
+		// -- group interacted with this frame, 0 if none
+		uint32_t pressedGroup = 0;
+		uint32_t doubleClickedGroup = 0;
+		uint32_t rightClickedGroup = 0;
+
+		// -- pressed a node that was already selected
+		bool pressedSelectedNode = false;
+
+		// -- screen position of grid 0,0
+		ImVec2 gridScreenPos = {};
+	};
+}
+
+namespace
+{
+	struct ImplUiHighlight {
+		std::vector<uint32_t> nodes;
+		std::vector<uint32_t> links;
+	};
+}
+
+// finds the links of the selected nodes and the nodes those links connect to
+static auto impl_ui_find_highlight(
+	ImplGraph const & graph
+) -> ImplUiHighlight
+{
+	auto const isSelected = [](uint32_t const nodeId) -> bool {
+		// -- find selected nodes
+		std::vector<int32_t> selected((size_t)ImNodes::NumSelectedNodes());
+		if (!selected.empty()) { ImNodes::GetSelectedNodes(selected.data()); }
+
+		// -- check if the node is among them
+		auto const it = (
+			std::find(selected.begin(), selected.end(), (int32_t)nodeId)
+		);
+		return it != selected.end();
+	};
+
+	// -- find links touching a selected node and the nodes at their ends
+	ImplUiHighlight highlight;
+	for (ImplLink const & link : graph.state.links) {
+		bool const selectedA = isSelected(link.nodeA);
+		bool const selectedB = isSelected(link.nodeB);
+		if (!selectedA && !selectedB) { continue; }
+		highlight.links.emplace_back(link.id);
+		if (!selectedA) { highlight.nodes.emplace_back(link.nodeA); }
+		if (!selectedB && link.groupB == 0) {
+			highlight.nodes.emplace_back(link.nodeB);
+		}
+	}
+	return highlight;
+}
+
+// stores the size imnodes measured for each node
+static auto impl_ui_update_node_sizes(
+	ImplGraph & graph
+) -> void
+{
+	for (auto & [nodeId, node] : graph.state.nodes) {
+		ImVec2 const size = ImNodes::GetNodeDimensions((int)nodeId);
+		node.width = size.x;
+		node.height = size.y;
+	}
+}
+
 // -----------------------------------------------------------------------------
 // -- ui impl: node drawing
 // -----------------------------------------------------------------------------
@@ -886,10 +1766,10 @@ static auto impl_ui_text_width(
 	return text ? ImGui::CalcTextSize(text).x : 0.0f;
 }
 
-// Statusline title (name left, queue right), then one row per pin index:
-// input i on the left, output i on the right, each with a dim format line.
 static auto impl_ui_draw_node(
 	ImplGraph const & graph,
+	ImplUiOffenders const & offenders,
+	ImplUiHighlight const & highlight,
 	ImplNodeInstance const & node
 ) -> void
 {
@@ -901,12 +1781,18 @@ static auto impl_ui_draw_node(
 	size_t const numOut = nodeType.pinOut.size();
 	size_t const numRows = std::max(numIn, numOut);
 
-	// -- measure; columns are separated by at least a gap
+	// -- measure
 	float const gap = impl_ui_text_width("    ");
 	float width = impl_ui_text_width(name) + gap + impl_ui_text_width(queue);
-	for (size_t row = 0; row < numRows; ++row) {
-		rg::PinDesc const * const pinIn = row < numIn ? &nodeType.pinIn[row] : nullptr;
-		rg::PinDesc const * const pinOut = row < numOut ? &nodeType.pinOut[row] : nullptr;
+	for (
+		size_t row = 0; row < numRows; ++row
+	) {
+		rg::PinDesc const * const pinIn = (
+			row < numIn ? &nodeType.pinIn[row] : nullptr
+		);
+		rg::PinDesc const * const pinOut = (
+			row < numOut ? &nodeType.pinOut[row] : nullptr
+		);
 		float const nameWidth = (
 			(pinIn ? impl_ui_text_width(pinIn->name.c_str()) : 0.0f)
 			+ gap
@@ -921,8 +1807,20 @@ static auto impl_ui_draw_node(
 	}
 
 	bool const selected = ImNodes::IsNodeSelected(nodeId);
-	if (selected) {
-		ImNodes::PushColorStyle(ImNodesCol_NodeOutline, kUiPalette.accent);
+	bool const offending = (
+		std::find(offenders.nodes.begin(), offenders.nodes.end(), node.id)
+		!= offenders.nodes.end()
+	);
+	bool const connected = (
+		std::find(highlight.nodes.begin(), highlight.nodes.end(), node.id)
+		!= highlight.nodes.end()
+	);
+	bool const outlined = selected || offending || connected;
+	if (outlined) {
+		ImU32 outlineColor = kUiPalette.secondary;
+		if (selected) { outlineColor = kUiPalette.accent; }
+		if (offending) { outlineColor = kUiPalette.error; }
+		ImNodes::PushColorStyle(ImNodesCol_NodeOutline, outlineColor);
 	}
 	ImNodes::BeginNode(nodeId);
 
@@ -952,8 +1850,12 @@ static auto impl_ui_draw_node(
 	float y = ImGui::GetCursorScreenPos().y;
 	for (size_t row = 0; row < numRows; ++row) {
 		uint32_t const index = static_cast<uint32_t>(row);
-		rg::PinDesc const * const pinIn = row < numIn ? &nodeType.pinIn[row] : nullptr;
-		rg::PinDesc const * const pinOut = row < numOut ? &nodeType.pinOut[row] : nullptr;
+		rg::PinDesc const * const pinIn = (
+			row < numIn ? &nodeType.pinIn[row] : nullptr
+		);
+		rg::PinDesc const * const pinOut = (
+			row < numOut ? &nodeType.pinOut[row] : nullptr
+		);
 
 		// previous-frame inputs are hollow
 		if (pinIn) {
@@ -991,8 +1893,12 @@ static auto impl_ui_draw_node(
 		y += lineStep;
 
 		// -- detail line; skipped when neither side has one
-		char const * const detailIn = pinIn ? impl_ui_pin_detail(*pinIn) : nullptr;
-		char const * const detailOut = pinOut ? impl_ui_pin_detail(*pinOut) : nullptr;
+		char const * const detailIn = (
+			pinIn ? impl_ui_pin_detail(*pinIn) : nullptr
+		);
+		char const * const detailOut = (
+			pinOut ? impl_ui_pin_detail(*pinOut) : nullptr
+		);
 		if (detailIn) {
 			ImGui::SetCursorScreenPos(ImVec2(left, y));
 			impl_ui_text(kUiPalette.dim, detailIn);
@@ -1013,35 +1919,368 @@ static auto impl_ui_draw_node(
 	ImGui::Dummy(ImVec2(width, 0.0f));
 
 	ImNodes::EndNode();
-	if (selected) {
+	if (outlined) {
 		ImNodes::PopColorStyle();
 	}
 }
 
-static auto impl_ui_draw_rendergraph(
-	ImplGraph const & graph
+// draws the transparent node holding a pin for each enabled field of the group
+static auto impl_ui_draw_group_pins(
+	ImplGroup const & group
 ) -> void
 {
-	// -- render nodes
-	for (auto const & [id, node] : graph.state.nodes) {
-		impl_ui_draw_node(graph, node);
+	if (group.enabledFields.empty()) { return; }
+	int const nodeId = (int)(kUiGroupNodeIdBase + group.id);
+	ImplUiKindStyle const style = impl_ui_kind_style(rg::PinKind::buffer);
+
+	// -- hide the node background and outline
+	ImU32 const clear = IM_COL32(0, 0, 0, 0);
+	ImNodes::PushColorStyle(ImNodesCol_NodeBackground, clear);
+	ImNodes::PushColorStyle(ImNodesCol_NodeBackgroundHovered, clear);
+	ImNodes::PushColorStyle(ImNodesCol_NodeBackgroundSelected, clear);
+	ImNodes::PushColorStyle(ImNodesCol_NodeOutline, clear);
+	ImNodes::BeginNode(nodeId);
+
+	// -- place the node below the group header
+	ImNodes::SetNodeDraggable(nodeId, false);
+	ImNodes::SetNodeGridSpacePos(
+		nodeId,
+		ImVec2(
+			group.x + kUiGroupPinOffset,
+			group.y + kUiGroupHeaderHeight + kUiGroupPinOffset
+		)
+	);
+
+	// -- pins
+	for (uint32_t const field : group.enabledFields) {
+		rg::GlobalFieldDesc const & desc = sImplGlobalLayout.fields[field];
+		ImNodes::PushColorStyle(ImNodesCol_Pin, style.color);
+		ImNodes::PushColorStyle(ImNodesCol_PinHovered, style.hovered);
+		ImNodes::BeginInputAttribute(
+			impl_ui_group_pin_id(group.id, field), style.shape
+		);
+		ImGui::TextUnformatted(desc.name.c_str());
+		ImNodes::EndInputAttribute();
+		ImNodes::PopColorStyle();
+		ImNodes::PopColorStyle();
 	}
+
+	ImNodes::EndNode();
+	for (int32_t i = 0; i < 4; ++i) {
+		ImNodes::PopColorStyle();
+	}
+}
+
+static auto impl_ui_group_is_selected(
+	ImplGraph const & graph,
+	rg::Group const hGroup
+) -> bool
+{
+	std::vector<uint32_t> const & groups = graph.ui.selected.groups;
+	return std::find(groups.begin(), groups.end(), hGroup.id) != groups.end();
+}
+
+// apply selection to the specified group
+static auto impl_ui_group_select(
+	ImplGraph & graph,
+	rg::Group const hGroup
+) -> void
+{
+	ImGuiIO const & io = ImGui::GetIO();
+	bool const modifier = io.KeyShift || io.KeyCtrl || io.KeySuper;
+	bool const selected = impl_ui_group_is_selected(graph, hGroup);
+	std::vector<uint32_t> & groups = graph.ui.selected.groups;
+
+	// -- toggle
+	if (modifier) {
+		if (selected) {
+			std::erase(groups, hGroup.id);
+		} else {
+			groups.emplace_back(hGroup.id);
+		}
+		return;
+	}
+
+	// -- replace the selection, unless the group is already in it
+	if (!selected) {
+		groups.clear();
+		groups.emplace_back(hGroup.id);
+		ImNodes::ClearNodeSelection();
+	}
+}
+
+// integer grid pixels the mouse moved since the previous call of this function
+// any fractional component will be carried into the next call
+static auto impl_ui_group_drag_delta(
+	ImplGraph & graph,
+	ImplUiGroupInput const & input
+) -> ImVec2
+{
+	// -- include the camera moving under the mouse
+	ImVec2 & posDelta = graph.ui.groupDragPosDelta;
+	ImVec2 const & lastGridScreenPos = graph.ui.groupDragGridScreenPos;
+	posDelta.x += (
+		ImGui::GetIO().MouseDelta.x
+		- (input.gridScreenPos.x - lastGridScreenPos.x)
+	);
+	posDelta.y += (
+		ImGui::GetIO().MouseDelta.y
+		- (input.gridScreenPos.y - lastGridScreenPos.y)
+	);
+	graph.ui.groupDragGridScreenPos = input.gridScreenPos;
+	ImVec2 const delta = { std::trunc(posDelta.x), std::trunc(posDelta.y) };
+	posDelta.x -= delta.x;
+	posDelta.y -= delta.y;
+	return delta;
+}
+
+// record an undo step if the group drag has not recorded one yet
+static auto impl_ui_group_drag_record(
+	ImplGraph & graph
+) -> void
+{
+	if (graph.ui.groupDragRecorded) { return; }
+	impl_edit_record(graph);
+	graph.ui.groupDragRecorded = true;
+}
+
+// translates the selected groups and nodes
+static auto impl_ui_selection_translate(
+	ImplGraph & graph,
+	ImVec2 const delta
+) -> void
+{
+	// true if any ancestor of the group is selected
+	auto const hasSelectedAncestor = [&](rg::Group const hGroup) -> bool {
+		rg::Group hAncestor = graph.state.groups.at(hGroup.id).hParentGroup;
+		while (hAncestor.id != 0) {
+			if (impl_ui_group_is_selected(graph, hAncestor)) { return true; }
+			hAncestor = graph.state.groups.at(hAncestor.id).hParentGroup;
+		}
+		return false;
+	};
+
+	// -- translate selected groups, which moves their children
+	for (uint32_t const groupId : graph.ui.selected.groups) {
+		ImplGroup * const group = impl_group(graph, groupId);
+		if (!group || hasSelectedAncestor({ groupId })) { continue; }
+		impl_group_translate(graph, *group, delta.x, delta.y);
+	}
+
+	// -- translate selected nodes that no selected group moves
+	for (auto const & [groupId, group] : graph.state.groups) {
+		bool const moved = (
+			impl_ui_group_is_selected(graph, { groupId })
+			|| hasSelectedAncestor({ groupId })
+		);
+		if (moved) { continue; }
+		for (rg::NodeInstance const hNode : group.hNodes) {
+			if (!ImNodes::IsNodeSelected((int)hNode.id)) { continue; }
+			ImplNodeInstance & node = graph.state.nodes.at(hNode.id);
+			node.posX += (int32_t)delta.x;
+			node.posY += (int32_t)delta.y;
+		}
+	}
+}
+
+static auto impl_ui_draw_group(
+	ImplGraph & graph,
+	ImplUiOffenders const & offenders,
+	ImplUiHighlight const & highlight,
+	ImplUiGroupInput & input,
+	ImplGroup & group
+) -> void
+{
+	ImVec2 const origin = input.gridScreenPos;
+	ImDrawList & drawList = *ImGui::GetWindowDrawList();
+
+	// -- draw on the channel beneath the links
+	drawList.ChannelsSetCurrent(0);
+
+	// -- draw group container
+	if (group.id != 0) {
+		ImGui::PushID(group.id);
+		ImVec2 const oriUl = { origin.x + group.x, origin.y + group.y };
+		ImVec2 const oriHeaderLr = {
+			origin.x + group.x + group.w,
+			origin.y + group.y + kUiGroupHeaderHeight
+		};
+		ImVec2 const oriLr = {
+			origin.x + group.x + group.w,
+			origin.y + group.y + group.h
+		};
+
+		// container
+		drawList.AddRectFilled(oriUl, oriLr, kUiPalette.surface, 4.0f);
+		// header
+		drawList.AddRectFilled(oriUl, oriHeaderLr, kUiPalette.tertiary);
+		// pin column divider
+		drawList.AddLine(
+			ImVec2 { oriUl.x + kGroupPinColumnWidth, oriHeaderLr.y },
+			ImVec2 { oriUl.x + kGroupPinColumnWidth, oriLr.y },
+			kUiPalette.dim
+		);
+		// header text
+		drawList.AddText(
+			ImVec2 { oriUl.x + 4.0f, oriUl.y + 2.0f },
+			kUiPalette.text,
+			group.name.c_str()
+		);
+
+		// -- outline if selected or illegal
+		bool const selected = impl_ui_group_is_selected(graph, { group.id });
+		std::vector<uint32_t> const & offendingGroups = offenders.groups;
+		bool const offending = (
+			std::find(offendingGroups.begin(), offendingGroups.end(), group.id)
+			!= offendingGroups.end()
+		);
+		if (selected) {
+			drawList.AddRect(oriUl, oriLr, kUiPalette.accent, 4.0f, 0, 2.0f);
+		}
+		if (offending) {
+			drawList.AddRect(oriUl, oriLr, kUiPalette.error, 4.0f, 0, 2.0f);
+		}
+
+		// -- draw an invisible button for imnode
+		ImGui::SetCursorScreenPos(oriUl);
+		ImGui::InvisibleButton("bar", ImVec2(group.w, kUiGroupHeaderHeight));
+		bool const headerHeld = ImGui::IsItemActive();
+		if (ImGui::IsItemActivated()) {
+			input.pressedGroup = group.id;
+			graph.ui.groupDragGridScreenPos = input.gridScreenPos;
+			impl_ui_group_select(graph, { group.id });
+		}
+		if (
+			ImGui::IsItemHovered()
+			&& ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)
+		) {
+			input.doubleClickedGroup = group.id;
+		}
+		if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+			input.rightClickedGroup = group.id;
+		}
+
+		// -- drag the group, moving all children
+		if (headerHeld) {
+			ImVec2 const delta = impl_ui_group_drag_delta(graph, input);
+			if (delta.x != 0.0f || delta.y != 0.0f) {
+				impl_ui_group_drag_record(graph);
+				graph.positionsDirty = true;
+				if (impl_ui_group_is_selected(graph, { group.id })) {
+					impl_ui_selection_translate(graph, delta);
+				} else {
+					impl_group_translate(graph, group, delta.x, delta.y);
+				}
+			}
+		}
+
+		// -- draw a handle in the bottom right corner to resize
+		drawList.AddTriangleFilled(
+			ImVec2 { oriLr.x, oriLr.y - kUiGroupHandleSize },
+			oriLr,
+			ImVec2 { oriLr.x - kUiGroupHandleSize, oriLr.y },
+			kUiPalette.dim
+		);
+		ImGui::SetCursorScreenPos(
+			ImVec2 {
+				oriLr.x - kUiGroupHandleSize,
+				oriLr.y - kUiGroupHandleSize
+			}
+		);
+		ImGui::InvisibleButton(
+			"resize", ImVec2(kUiGroupHandleSize, kUiGroupHandleSize)
+		);
+		if (ImGui::IsItemActivated()) {
+			input.pressedGroup = group.id;
+			graph.ui.groupDragGridScreenPos = input.gridScreenPos;
+		}
+		if (ImGui::IsItemActive()) {
+			ImVec2 const delta = impl_ui_group_drag_delta(graph, input);
+			if (delta.x != 0.0f || delta.y != 0.0f) {
+				impl_ui_group_drag_record(graph);
+				group.w = std::max(kUiGroupMinWidth, group.w + delta.x);
+				group.h = std::max(kUiGroupMinHeight, group.h + delta.y);
+			}
+		}
+
+		ImGui::PopID();
+	}
+
+	// -- draw the pins of the enabled fields
+	if (group.id != 0) {
+		impl_ui_draw_group_pins(group);
+	}
+
+	// -- draw child groups
+	for (auto const & childGroup : group.hChildrenGroup) {
+		impl_ui_draw_group(
+			graph,
+			offenders,
+			highlight,
+			input,
+			graph.state.groups.at(childGroup.id)
+		);
+	}
+
+	// -- draw nodes
+	for (rg::NodeInstance const & hNode : group.hNodes) {
+		ImplNodeInstance const & node = graph.state.nodes.at(hNode.id);
+		impl_ui_draw_node(graph, offenders, highlight, node);
+	}
+}
+
+static auto impl_ui_draw_rendergraph(
+	ImplGraph & graph,
+	ImplUiOffenders const & offenders,
+	ImplUiHighlight const & highlight,
+	ImplUiGroupInput & groupInput
+) -> void
+{
+	// -- find grid 0,0 before drawing moves the cursor
+	groupInput.gridScreenPos = {
+		ImGui::GetCursorScreenPos().x + ImNodes::EditorContextGetPanning().x,
+		ImGui::GetCursorScreenPos().y + ImNodes::EditorContextGetPanning().y,
+	};
+
+	// -- render group/nodes
+	impl_ui_draw_group(
+		graph, offenders, highlight, groupInput, graph.state.groups.at(0)
+	);
 
 	// -- render links; colored by the resource kind the output produces
 	for (ImplLink const & link : graph.state.links) {
 		ImplNodeInstance const & nodeA = graph.state.nodes.at(link.nodeA);
-		ImplNodeInstance const & nodeB = graph.state.nodes.at(link.nodeB);
 		rg::PinDesc const & pinA = impl_node_type(nodeA.type).pinOut[link.pinA];
-		rg::PinDesc const & pinB = impl_node_type(nodeB.type).pinIn[link.pinB];
 		ImplUiKindStyle const style = impl_ui_kind_style(pinA.kind);
-		float const alpha = (
-			pinB.pinIn.temporal == rg::PinResourceTemporal::previousFrame
-			? kUiTemporalLinkAlpha
-			: 1.0f
+
+		// -- fade links into previous-frame inputs; group fields never are
+		bool const temporal = (
+			link.groupB == 0
+			&& impl_node_type(graph.state.nodes.at(link.nodeB).type)
+				.pinIn[link.pinB].pinIn.temporal
+				== rg::PinResourceTemporal::previousFrame
 		);
-		ImNodes::PushColorStyle(
-			ImNodesCol_Link, impl_ui_color_alpha(style.color, alpha)
+		float const alpha = temporal ? kUiTemporalLinkAlpha : 1.0f;
+		int const pinBId = (
+			link.groupB != 0
+			? impl_ui_group_pin_id(link.groupB, link.fieldB)
+			: impl_ui_pin_id(link.nodeB, rg::PinDir::in, link.pinB)
 		);
+		bool const highlighted = (
+			std::find(highlight.links.begin(), highlight.links.end(), link.id)
+			!= highlight.links.end()
+		);
+		ImU32 const linkColor = (
+			highlighted
+			? style.selected
+			: impl_ui_color_alpha(style.color, alpha)
+		);
+		if (highlighted) {
+			ImNodes::PushStyleVar(
+				ImNodesStyleVar_LinkThickness, kUiHighlightLinkThickness
+			);
+		}
+		ImNodes::PushColorStyle(ImNodesCol_Link, linkColor);
 		ImNodes::PushColorStyle(
 			ImNodesCol_LinkHovered, impl_ui_color_alpha(style.hovered, alpha)
 		);
@@ -1049,17 +2288,75 @@ static auto impl_ui_draw_rendergraph(
 		ImNodes::Link(
 			static_cast<int>(link.id),
 			impl_ui_pin_id(link.nodeA, rg::PinDir::out, link.pinA),
-			impl_ui_pin_id(link.nodeB, rg::PinDir::in, link.pinB)
+			pinBId
 		);
 		ImNodes::PopColorStyle();
 		ImNodes::PopColorStyle();
 		ImNodes::PopColorStyle();
+		if (highlighted) {
+			ImNodes::PopStyleVar();
+		}
 	}
 }
 
 // -----------------------------------------------------------------------------
 // -- ui impl: properties popup
 // -----------------------------------------------------------------------------
+
+static auto impl_ui_group_open_rename(
+	ImplGraph & graph,
+	rg::Group const hGroup
+) -> void
+{
+	ImplGroup const * const group = impl_group(graph, hGroup.id);
+	if (!group) { return; }
+	graph.ui.popup.renameGroup = hGroup.id;
+	snprintf(
+		graph.ui.nameBuffer,
+		sizeof(graph.ui.nameBuffer),
+		"%s", group->name.c_str()
+	);
+	ImGui::OpenPopup("rg_group_rename");
+}
+
+static auto impl_ui_draw_group_rename(
+	rg::Graph const hGraph
+) -> void
+{
+	ImplGraph & graph = impl_graph(hGraph);
+	if (!ImGui::BeginPopup("rg_group_rename")) { return; }
+
+	// -- close if the group no longer exists
+	rg::Group const hGroup = { graph.ui.popup.renameGroup };
+	if (!impl_group(graph, hGroup.id)) {
+		ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+		return;
+	}
+
+	// -- name field
+	if (ImGui::IsWindowAppearing()) {
+		ImGui::SetKeyboardFocusHere();
+	}
+	ImGui::SetNextItemWidth(240.0f);
+	bool const entered = ImGui::InputText(
+		"name",
+		graph.ui.nameBuffer,
+		sizeof(graph.ui.nameBuffer),
+		ImGuiInputTextFlags_EnterReturnsTrue
+	);
+
+	// -- commit rename once editing finishes
+	if (ImGui::IsItemDeactivatedAfterEdit()) {
+		rg::graph_group_set_name(hGraph, hGroup, graph.ui.nameBuffer);
+	}
+
+	// -- close on enter
+	if (entered) {
+		ImGui::CloseCurrentPopup();
+	}
+	ImGui::EndPopup();
+}
 
 static auto impl_ui_node_open_properties(
 	ImplGraph & graph,
@@ -1069,7 +2366,11 @@ static auto impl_ui_node_open_properties(
 	ImplNodeInstance const * const node = impl_node_find(graph, nodeId);
 	if (!node) { return; }
 	graph.ui.propertiesNode = nodeId;
-	snprintf(graph.ui.nameBuffer, sizeof(graph.ui.nameBuffer), "%s", node->name.c_str());
+	snprintf(
+		graph.ui.nameBuffer,
+		sizeof(graph.ui.nameBuffer),
+		"%s", node->name.c_str()
+	);
 	ImGui::OpenPopup("rg_node_properties");
 }
 
@@ -1081,7 +2382,9 @@ static auto impl_ui_draw_properties(
 	if (!ImGui::BeginPopup("rg_node_properties")) { return; }
 
 	// the node can vanish under the popup, eg via undo
-	ImplNodeInstance const * const node = impl_node_find(graph, graph.ui.propertiesNode);
+	ImplNodeInstance const * const node = (
+		impl_node_find(graph, graph.ui.propertiesNode)
+	);
 	if (!node) {
 		ImGui::CloseCurrentPopup();
 		ImGui::EndPopup();
@@ -1093,18 +2396,25 @@ static auto impl_ui_draw_properties(
 	// -- name; committed once editing finishes so a rename is one undo step
 	ImGui::SetNextItemWidth(240.0f);
 	ImGui::InputTextWithHint(
-		"name", nodeType.name.c_str(), graph.ui.nameBuffer, sizeof(graph.ui.nameBuffer)
+		"name",
+		nodeType.name.c_str(),
+		graph.ui.nameBuffer,
+		sizeof(graph.ui.nameBuffer)
 	);
 	if (ImGui::IsItemDeactivatedAfterEdit()) {
 		rg::node_instance_set_name(hGraph, hNode, graph.ui.nameBuffer);
 	}
 
-	ImGui::Text("type   %s (%s)", nodeType.name.c_str(), nodeType.uniqueName.c_str());
+	ImGui::Text(
+		"type   %s (%s)",
+		nodeType.name.c_str(), nodeType.uniqueName.c_str()
+	);
 	ImGui::Text("queue  %s", impl_to_string(nodeType.queue));
 	ImGui::Text("id     %u", node->id);
 
 	ImGuiTableFlags const tableFlags = (
-		ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit
+		ImGuiTableFlags_Borders
+		| ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit
 	);
 
 	// -- inputs
@@ -1124,16 +2434,31 @@ static auto impl_ui_draw_properties(
 				);
 				ImGui::TableNextRow();
 				ImGui::TableNextColumn();
-				ImGui::Text("%s%s", pin.name.c_str(), pin.pinIn.required ? "" : " (optional)");
-				ImGui::TableNextColumn(); ImGui::TextUnformatted(impl_to_string(pin.kind));
-				ImGui::TableNextColumn(); ImGui::TextUnformatted(impl_to_string(pin.pinIn.format));
-				ImGui::TableNextColumn(); ImGui::TextUnformatted(impl_to_string(pin.pinIn.accessMode));
-				ImGui::TableNextColumn(); ImGui::TextUnformatted(previous ? "previous" : "current");
+				ImGui::Text(
+					"%s%s",
+					pin.name.c_str(), pin.pinIn.required ? "" : " (optional)"
+				);
 				ImGui::TableNextColumn();
-				ImGui::Text("%gx%g, %u mips", pin.scaleWidth, pin.scaleHeight, pin.mipLevels);
+				ImGui::TextUnformatted(impl_to_string(pin.kind));
 				ImGui::TableNextColumn();
-				if (ImplLink const * link = impl_link_find_into(graph, node->id, i)) {
-					ImplNodeInstance const & from = graph.state.nodes.at(link->nodeA);
+				ImGui::TextUnformatted(impl_to_string(pin.pinIn.format));
+				ImGui::TableNextColumn();
+				ImGui::TextUnformatted(impl_to_string(pin.pinIn.accessMode));
+				ImGui::TableNextColumn();
+				ImGui::TextUnformatted(previous ? "previous" : "current");
+				ImGui::TableNextColumn();
+				ImGui::Text(
+					"%gx%g, %u mips",
+					pin.scaleWidth, pin.scaleHeight, pin.mipLevels
+				);
+				ImGui::TableNextColumn();
+				ImplLink const * const link = (
+					impl_link_find_into(graph, node->id, i)
+				);
+				if (link) {
+					ImplNodeInstance const & from = (
+						graph.state.nodes.at(link->nodeA)
+					);
 					ImGui::Text(
 						"%s.%s",
 						impl_ui_node_name(from),
@@ -1166,13 +2491,21 @@ static auto impl_ui_draw_properties(
 					}
 				);
 				ImGui::TableNextRow();
-				ImGui::TableNextColumn(); ImGui::TextUnformatted(pin.name.c_str());
-				ImGui::TableNextColumn(); ImGui::TextUnformatted(impl_to_string(pin.kind));
-				ImGui::TableNextColumn(); ImGui::TextUnformatted(impl_to_string(pin.pinOut.format));
-				ImGui::TableNextColumn(); ImGui::TextUnformatted(impl_to_string(pin.pinOut.accessMode));
 				ImGui::TableNextColumn();
-				ImGui::Text("%gx%g, %u mips", pin.scaleWidth, pin.scaleHeight, pin.mipLevels);
-				ImGui::TableNextColumn(); ImGui::Text("%d", static_cast<int>(numLinks));
+				ImGui::TextUnformatted(pin.name.c_str());
+				ImGui::TableNextColumn();
+				ImGui::TextUnformatted(impl_to_string(pin.kind));
+				ImGui::TableNextColumn();
+				ImGui::TextUnformatted(impl_to_string(pin.pinOut.format));
+				ImGui::TableNextColumn();
+				ImGui::TextUnformatted(impl_to_string(pin.pinOut.accessMode));
+				ImGui::TableNextColumn();
+				ImGui::Text(
+					"%gx%g, %u mips",
+					pin.scaleWidth, pin.scaleHeight, pin.mipLevels
+				);
+				ImGui::TableNextColumn();
+				ImGui::Text("%d", static_cast<int>(numLinks));
 			}
 			ImGui::EndTable();
 		}
@@ -1204,6 +2537,7 @@ static auto impl_ui_draw_properties(
 
 static auto impl_ui_handle_context_menu(
 	rg::Graph const hGraph,
+	ImplUiGroupInput const & groupInput,
 	bool const editorHovered
 ) -> void
 {
@@ -1214,9 +2548,18 @@ static auto impl_ui_handle_context_menu(
 		if (ImNodes::IsLinkHovered(&linkId)) {
 			graph.ui.contextLink = static_cast<uint32_t>(linkId);
 			ImGui::OpenPopup("rg_link_menu");
+		} else if (
+			ImNodes::IsNodeHovered(&nodeId)
+			&& (uint32_t)nodeId >= kUiGroupNodeIdBase
+		) {
+			graph.ui.popup.contextGroup = (uint32_t)nodeId - kUiGroupNodeIdBase;
+			ImGui::OpenPopup("rg_group_menu");
 		} else if (ImNodes::IsNodeHovered(&nodeId)) {
 			graph.ui.contextNode = static_cast<uint32_t>(nodeId);
 			ImGui::OpenPopup("rg_node_menu");
+		} else if (groupInput.rightClickedGroup != 0) {
+			graph.ui.popup.contextGroup = groupInput.rightClickedGroup;
+			ImGui::OpenPopup("rg_group_menu");
 		} else if (editorHovered) {
 			ImGui::OpenPopup("rg_context_menu");
 		}
@@ -1245,7 +2588,55 @@ static auto impl_ui_handle_context_menu(
 		impl_ui_node_open_properties(graph, graph.ui.contextNode);
 	}
 
+	if (ImGui::BeginPopup("rg_group_menu")) {
+		rg::Group const hContextGroup = { graph.ui.popup.contextGroup };
+		ImplGroup const * const contextGroup = (
+			impl_group(graph, hContextGroup.id)
+		);
+		if (contextGroup && ImGui::BeginMenu("override fields")) {
+			uint32_t const numFields = (
+				(uint32_t)sImplGlobalLayout.fields.size()
+			);
+			for (uint32_t field = 0; field < numFields; ++field) {
+				std::vector<uint32_t> const & enabledFields = (
+					contextGroup->enabledFields
+				);
+				bool const enabled = (
+					std::find(enabledFields.begin(), enabledFields.end(), field)
+					!= enabledFields.end()
+				);
+				char const * const name = (
+					sImplGlobalLayout.fields[field].name.c_str()
+				);
+				if (ImGui::MenuItem(name, nullptr, enabled)) {
+					rg::graph_group_set_field_enabled(
+						hGraph, hContextGroup, field, !enabled
+					);
+				}
+			}
+			ImGui::EndMenu();
+		}
+		if (ImGui::MenuItem("delete group")) {
+			rg::Group const hGroup = { graph.ui.popup.contextGroup };
+			rg::graph_group_destroy(hGraph, hGroup);
+			std::erase(graph.ui.selected.groups, hGroup.id);
+		}
+		ImGui::EndPopup();
+	}
+
 	if (ImGui::BeginPopup("rg_context_menu")) {
+		if (ImGui::MenuItem("add group")) {
+			ImVec2 const mouse = ImGui::GetMousePosOnOpeningCurrentPopup();
+			rg::graph_group_create(
+				hGraph,
+				"Group",
+				rg::graph_group_default(),
+				(int32_t)std::lround(mouse.x - groupInput.gridScreenPos.x),
+				(int32_t)std::lround(mouse.y - groupInput.gridScreenPos.y),
+				260,
+				180
+			);
+		}
 		if (ImGui::BeginMenu("add node")) {
 			for (rg::NodeTypeCi const & nodeType : sImplNodeTypes) {
 				if (!ImGui::MenuItem(nodeType.name.c_str())) {
@@ -1280,6 +2671,7 @@ static auto impl_ui_handle_context_menu(
 // EndNodeEditor, but editor hover only inside it, so that's passed in.
 static auto impl_ui_handle_input(
 	rg::Graph const hGraph,
+	ImplUiGroupInput const & groupInput,
 	bool const editorHovered
 ) -> void
 {
@@ -1294,13 +2686,44 @@ static auto impl_ui_handle_input(
 			ImplUiPin a = impl_ui_pin_decode(startedId);
 			ImplUiPin b = impl_ui_pin_decode(endedId);
 			if (a.dir == rg::PinDir::in) { std::swap(a, b); }
+			bool const toGroupField = b.isGroupField;
+
+			// -- link into a group field, replacing the field's old link
+			bool const validGroupField = (
+				toGroupField && !a.isGroupField
+				&& a.dir == rg::PinDir::out
+				&& impl_group_field_link_check(
+					graph, a.nodeId, a.index, b.nodeId, b.index, true
+				)
+			);
+			if (validGroupField) {
+				rg::transaction_begin(hGraph);
+				ImplLink const * const old = (
+					impl_link_find_into_group(graph, b.nodeId, b.index)
+				);
+				if (old) {
+					rg::link_destroy(hGraph, { old->id });
+				}
+				rg::group_field_link(
+					hGraph, { a.nodeId }, a.index, { b.nodeId }, b.index
+				);
+				rg::transaction_end(hGraph);
+			}
+
+			// -- link into a node pin
 			bool const valid = (
-				a.dir == rg::PinDir::out && b.dir == rg::PinDir::in
-				&& impl_link_check(graph, a.nodeId, a.index, b.nodeId, b.index, true)
+				!toGroupField && !a.isGroupField
+				&& a.dir == rg::PinDir::out && b.dir == rg::PinDir::in
+				&& impl_link_check(
+					graph, a.nodeId, a.index, b.nodeId, b.index, true
+				)
 			);
 			if (valid) {
 				rg::transaction_begin(hGraph);
-				if (ImplLink const * old = impl_link_find_into(graph, b.nodeId, b.index)) {
+				ImplLink const * const old = (
+					impl_link_find_into(graph, b.nodeId, b.index)
+				);
+				if (old) {
 					rg::link_destroy(hGraph, { old->id });
 				}
 				rg::node_instance_link(
@@ -1311,29 +2734,38 @@ static auto impl_ui_handle_input(
 		}
 	}
 
-	// -- node properties
+	// -- store camera panning on press
+	if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+		graph.ui.pressPanning = ImNodes::EditorContextGetPanning();
+	}
+
+	// -- node properties on double click
 	{
-		bool const modifier = io.KeyShift || io.KeyCtrl || io.KeySuper;
-		if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-			int nodeId = 0;
-			int pinId = 0;
-			bool const onNode = (
-				ImNodes::IsNodeHovered(&nodeId) && !ImNodes::IsPinHovered(&pinId)
-			);
-			graph.ui.pressNode = onNode && !modifier ? static_cast<uint32_t>(nodeId) : 0;
+		int nodeId = 0;
+		int pinId = 0;
+		bool const onNode = (
+			ImNodes::IsNodeHovered(&nodeId) && !ImNodes::IsPinHovered(&pinId)
+		);
+		if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && onNode) {
+			graph.ui.propertiesNodePending = static_cast<uint32_t>(nodeId);
 		}
-		if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && graph.ui.pressNode) {
-			float const threshold = io.MouseDragThreshold;
-			if (io.MouseDragMaxDistanceSqr[0] < threshold * threshold) {
-				impl_ui_node_open_properties(graph, graph.ui.pressNode);
-			}
-			graph.ui.pressNode = 0;
+
+		// -- open once the mouse is released
+		if (
+			ImGui::IsMouseReleased(ImGuiMouseButton_Left)
+			&& graph.ui.propertiesNodePending != 0
+		) {
+			impl_ui_node_open_properties(graph, graph.ui.propertiesNodePending);
+			graph.ui.propertiesNodePending = 0;
 		}
 	}
 
 	// -- node translation
 	if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
 		rg::transaction_begin(hGraph);
+		graph.transactionRecorded = graph.ui.groupDragRecorded;
+		graph.ui.groupDragRecorded = false;
+		graph.ui.groupDragPosDelta = {};
 		for (auto const & [id, node] : graph.state.nodes) {
 			ImVec2 const pos = ImNodes::GetNodeGridSpacePos(static_cast<int>(id));
 			rg::node_instance_set_position(
@@ -1343,9 +2775,125 @@ static auto impl_ui_handle_input(
 				static_cast<int32_t>(std::lround(pos.y))
 			);
 		}
-		rg::transaction_end(hGraph);
 		// setting positions only mirrors imnodes; nothing to push back
 		graph.positionsDirty = false;
+		graph.editReverted = false;
+		rg::transaction_end(hGraph);
+
+		// -- restore camera if the edit was reverted
+		if (graph.editReverted) {
+			ImNodes::EditorContextResetPanning(graph.ui.pressPanning);
+		}
+	}
+
+	// -- clear group selection when clicking away from groups
+	{
+		bool const modifier = io.KeyShift || io.KeyCtrl || io.KeySuper;
+		if (
+			ImGui::IsMouseClicked(ImGuiMouseButton_Left)
+			&& editorHovered
+			&& !modifier
+			&& groupInput.pressedGroup == 0
+			&& !groupInput.pressedSelectedNode
+		) {
+			graph.ui.selected.groups.clear();
+		}
+	}
+
+	// -- start box selection when pressing on empty canvas
+	if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+		int hoveredId = 0;
+		bool const onElement = (
+			ImNodes::IsNodeHovered(&hoveredId)
+			|| ImNodes::IsPinHovered(&hoveredId)
+			|| ImNodes::IsLinkHovered(&hoveredId)
+		);
+		graph.ui.selected.boxActive = (
+			editorHovered && !onElement && groupInput.pressedGroup == 0
+		);
+		graph.ui.selected.boxBaseGroups = graph.ui.selected.groups;
+		graph.ui.selected.boxStartGridPos = {
+			io.MouseClickedPos[0].x - groupInput.gridScreenPos.x,
+			io.MouseClickedPos[0].y - groupInput.gridScreenPos.y,
+		};
+	}
+
+	// -- select the groups whose header the box touches
+	if (
+		graph.ui.selected.boxActive
+		&& ImGui::IsMouseDown(ImGuiMouseButton_Left)
+	) {
+		ImVec2 const boxA = {
+			graph.ui.selected.boxStartGridPos.x + groupInput.gridScreenPos.x,
+			graph.ui.selected.boxStartGridPos.y + groupInput.gridScreenPos.y,
+		};
+		ImVec2 const boxB = io.MousePos;
+		ImVec2 const boxMin = {
+			std::min(boxA.x, boxB.x), std::min(boxA.y, boxB.y)
+		};
+		ImVec2 const boxMax = {
+			std::max(boxA.x, boxB.x), std::max(boxA.y, boxB.y)
+		};
+		graph.ui.selected.groups = graph.ui.selected.boxBaseGroups;
+		for (auto const & [groupId, group] : graph.state.groups) {
+			if (groupId == 0) { continue; }
+			ImVec2 const headerMin = {
+				groupInput.gridScreenPos.x + group.x,
+				groupInput.gridScreenPos.y + group.y,
+			};
+			ImVec2 const headerMax = {
+				headerMin.x + group.w,
+				headerMin.y + kUiGroupHeaderHeight,
+			};
+			bool const touched = (
+				boxMin.x < headerMax.x && headerMin.x < boxMax.x
+				&& boxMin.y < headerMax.y && headerMin.y < boxMax.y
+			);
+			if (touched && !impl_ui_group_is_selected(graph, { groupId })) {
+				graph.ui.selected.groups.emplace_back(groupId);
+			}
+		}
+	}
+	if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+		graph.ui.selected.boxActive = false;
+	}
+
+	// -- move selected groups along with selected nodes dragged by imnodes
+	if (
+		!graph.ui.selected.groups.empty()
+		&& ImGui::IsMouseDown(ImGuiMouseButton_Left)
+	) {
+		std::vector<int> nodes((size_t)ImNodes::NumSelectedNodes());
+		if (!nodes.empty()) { ImNodes::GetSelectedNodes(nodes.data()); }
+
+		// -- find how far imnodes moved a node since the last frame
+		ImVec2 delta = {};
+		for (int const nodeId : nodes) {
+			if ((uint32_t)nodeId >= kUiGroupNodeIdBase) { continue; }
+			ImVec2 const pos = ImNodes::GetNodeGridSpacePos(nodeId);
+			ImplNodeInstance const & node = graph.state.nodes.at(nodeId);
+			delta = {
+				(float)std::lround(pos.x) - (float)node.posX,
+				(float)std::lround(pos.y) - (float)node.posY,
+			};
+			if (delta.x != 0.0f || delta.y != 0.0f) { break; }
+		}
+		if (delta.x != 0.0f || delta.y != 0.0f) {
+			impl_ui_group_drag_record(graph);
+			impl_ui_selection_translate(graph, delta);
+
+			// -- push positions now, as the release below reads them
+			for (auto const & [nodeId, node] : graph.state.nodes) {
+				ImNodes::SetNodeGridSpacePos(
+					(int)nodeId, ImVec2((float)node.posX, (float)node.posY)
+				);
+			}
+		}
+	}
+
+	// -- rename group on double click
+	if (groupInput.doubleClickedGroup != 0) {
+		impl_ui_group_open_rename(graph, { groupInput.doubleClickedGroup });
 	}
 
 	// -- selection deleted
@@ -1367,7 +2915,11 @@ static auto impl_ui_handle_input(
 		for (int const id : nodes) {
 			rg::node_instance_destroy(hGraph, { static_cast<uint32_t>(id) });
 		}
+		for (uint32_t const groupId : graph.ui.selected.groups) {
+			rg::graph_group_destroy(hGraph, { groupId });
+		}
 		rg::transaction_end(hGraph);
+		graph.ui.selected.groups.clear();
 		ImNodes::ClearLinkSelection();
 		ImNodes::ClearNodeSelection();
 	}
@@ -1385,6 +2937,7 @@ static auto impl_ui_handle_input(
 			changed = rg::redo(hGraph);
 		}
 		if (changed) {
+			graph.ui.selected.groups.clear();
 			ImNodes::ClearLinkSelection();
 			ImNodes::ClearNodeSelection();
 		}
@@ -1392,7 +2945,9 @@ static auto impl_ui_handle_input(
 
 	// -- WASD panning
 	{
-		bool const focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
+		bool const focused = (
+			ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows)
+		);
 		bool const modifier = io.KeyCtrl || io.KeySuper || io.KeyAlt;
 		if (focused && !modifier && !io.WantTextInput) {
 			float const speed = 800.0f * io.DeltaTime; // pixels per second
@@ -1411,10 +2966,11 @@ static auto impl_ui_handle_input(
 	}
 
 	// -- right click menus
-	impl_ui_handle_context_menu(hGraph, editorHovered);
+	impl_ui_handle_context_menu(hGraph, groupInput, editorHovered);
 
 	// -- draw properties
 	impl_ui_draw_properties(hGraph);
+	impl_ui_draw_group_rename(hGraph);
 }
 
 // -----------------------------------------------------------------------------
@@ -1432,9 +2988,21 @@ auto rg::ui_draw(
 	ImGui::PopStyleColor();
 	ImNodes::EditorContextSet(graph.editor);
 
+	ImplUiOffenders const offenders = impl_ui_find_offenders(graph);
+	ImplUiHighlight const highlight = impl_ui_find_highlight(graph);
+
+	// -- find if a selected node is pressed, before imnodes updates selection
+	ImplUiGroupInput groupInput;
+	int hoveredNodeId = 0;
+	groupInput.pressedSelectedNode = (
+		ImGui::IsMouseClicked(ImGuiMouseButton_Left)
+		&& ImNodes::IsNodeHovered(&hoveredNodeId)
+		&& ImNodes::IsNodeSelected(hoveredNodeId)
+	);
+
 	impl_ui_theme_push();
 	ImNodes::BeginNodeEditor();
-	impl_ui_draw_rendergraph(graph);
+	impl_ui_draw_rendergraph(graph, offenders, highlight, groupInput);
 	graph.positionsDirty = false;
 
 	// -- minimap; imnodes needs it after all nodes and links
@@ -1445,7 +3013,8 @@ auto rg::ui_draw(
 
 	ImNodes::EndNodeEditor();
 	impl_ui_theme_pop();
+	impl_ui_update_node_sizes(graph);
 
-	impl_ui_handle_input(hGraph, editorHovered);
+	impl_ui_handle_input(hGraph, groupInput, editorHovered);
 	ImGui::End();
 }

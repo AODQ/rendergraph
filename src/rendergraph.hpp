@@ -64,20 +64,22 @@ namespace rg
 		PinDir dir;
 
 		struct {
-			bool required;
-			PinResourceTemporal temporal;
-			ImageFormat format;
-			AccessMode accessMode;
+			bool required = true;
+			PinResourceTemporal temporal = PinResourceTemporal::currentFrame;
+			ImageFormat format = ImageFormat::rgba16;
+			AccessMode accessMode = AccessMode::Sampled;
 		} pinIn;
 
 		struct {
-			ImageFormat format;
-			AccessMode accessMode;
+			ImageFormat format = ImageFormat::rgba16;
+			AccessMode accessMode = AccessMode::StorageWrite;
 		} pinOut;
 
-		f32 scaleWidth;
-		f32 scaleHeight;
-		u32 mipLevels;
+		f32 scaleWidth = 1.0f;
+		f32 scaleHeight = 1.0f;
+		u32 mipLevels = 1;
+
+		std::string bufferType = "";
 	};
 
 	// --------------------------------------------------------------------------
@@ -133,6 +135,21 @@ namespace rg
 	};
 
 	// --------------------------------------------------------------------------
+	// -- global layout
+	// --------------------------------------------------------------------------
+
+	struct GlobalFieldDesc {
+		std::string name;
+		// matches the bufferType of the pins that can link to the field
+		std::string bufferType;
+	};
+
+	// flat list of named fields that groups can override
+	struct GlobalLayoutCi {
+		std::vector<GlobalFieldDesc> fields;
+	};
+
+	// --------------------------------------------------------------------------
 	// -- handles
 	// --------------------------------------------------------------------------
 
@@ -159,6 +176,14 @@ namespace rg
 	NodeType node_type_find(std::string const & uniqueName);
 
 	// --------------------------------------------------------------------------
+	// -- global layout registration
+	// --------------------------------------------------------------------------
+
+	// The global layout is process-wide and shared by all graphs. It can be
+	// registered only once.
+	void register_global_layout(GlobalLayoutCi const & ci);
+
+	// --------------------------------------------------------------------------
 	// -- graph
 	// --------------------------------------------------------------------------
 
@@ -167,23 +192,73 @@ namespace rg
 	void graph_destroy(Graph const hGraph);
 
 	// --------------------------------------------------------------------------
+	// -- group
+	// --------------------------------------------------------------------------
+
+	struct Group {
+		uint32_t id { 0 };
+	};
+
+	auto graph_group_create(
+		rg::Graph const hGraph,
+		std::string const & name,
+		rg::Group const hParentGroup = {0},
+		int32_t const positionX = 0,
+		int32_t const positionY = 0,
+		int32_t const width = 200,
+		int32_t const height = 200
+	) -> Group;
+
+	auto graph_group_default() -> rg::Group;
+
+	// nodes and child groups of the group remain
+	auto graph_group_destroy(
+		rg::Graph const hGraph,
+		rg::Group const hGroup
+	) -> void;
+
+	auto graph_group_set_name(
+		rg::Graph const hGraph,
+		rg::Group const hGroup,
+		std::string const & name
+	) -> void;
+
+	// Enables or disables the override of a global layout field on the group.
+	// An enabled field adds a pin to the group. Disabling destroys the links
+	// into that pin. Fields start disabled.
+	auto graph_group_set_field_enabled(
+		rg::Graph const hGraph,
+		rg::Group const hGroup,
+		uint32_t const field,
+		bool const enabled
+	) -> void;
+
+	// --------------------------------------------------------------------------
 	// -- edits: nodes
 	// --------------------------------------------------------------------------
 
+	// add a node instance of the given type to the graph at given position.
+	// If hGroup is non-zero, will add to be a child of the associated group.
+	// if the position is outside of that group's bounds, the edit will
+	// be reverted and returned NodeInstance will be 0.
 	NodeInstance node_instance_create(
-		Graph const hGraph,
+		rg::Graph const hGraph,
 		std::string const & uniqueName,
+		rg::Group const hGroup = { 0 },
 		int32_t const positionX = 0,
 		int32_t const positionY = 0,
 		std::vector<rg::ParameterValue> const & parameterValues = {}
 	);
 
 	// also destroys all links attached to the node
-	void node_instance_destroy(Graph const hGraph, NodeInstance const hNode);
+	void node_instance_destroy(
+		rg::Graph const hGraph,
+		rg::NodeInstance const hNode
+	);
 
 	void node_instance_set_position(
-		Graph const hGraph,
-		NodeInstance const hNode,
+		rg::Graph const hGraph,
+		rg::NodeInstance const hNode,
 		int32_t const positionX,
 		int32_t const positionY
 	);
@@ -220,6 +295,27 @@ namespace rg
 		uint32_t const pinA,
 		NodeInstance const hNodeB,
 		uint32_t const pinB
+	);
+
+	// returns if hNodeA.pinA -> hGroup.field can be linked.
+	// fails on a disabled field, bufferType mismatch, already-linked field or
+	// if hNodeA is in the group or reachable from a node in the group.
+	bool group_field_can_link(
+		Graph const hGraph,
+		NodeInstance const hNodeA,
+		uint32_t const pinA,
+		Group const hGroup,
+		uint32_t const field
+	);
+
+	// links hNodeA.pinA -> hGroup.field
+	// returns { 0 } if group_field_can_link fails
+	Link group_field_link(
+		Graph const hGraph,
+		NodeInstance const hNodeA,
+		uint32_t const pinA,
+		Group const hGroup,
+		uint32_t const field
 	);
 
 	void link_destroy(Graph const hGraph, Link const hLink);
